@@ -115,9 +115,17 @@ ui <- fluidPage(
       conditionalPanel(
         condition = "input.multi_gapdh == 'yes'",
         tags$hr(),
-        helpText("Select the column(s) from Tab 2 that identify which rows/measurements belong to the same sample for GAPDH."),
-        uiOutput("gapdh_group_cols_ui")
+        tags$p(
+          "Select the column(s) from Tab 2 that identify which rows/measurements belong to the same sample for GAPDH."
+        ),
+        tags$p(
+          tags$em("For example, if a single individual contributes to multiple tissues, select the columns that identify the individual and the tissue.")
+        )
       ),
+        
+        uiOutput("gapdh_group_cols_ui"),
+        
+
       
       tags$hr(),
       verbatimTextOutput("review_match_status")
@@ -283,15 +291,15 @@ server <- function(input, output, session) {
   })
   
   # APPLY types to the parsed columns (this drives the Tab 2 preview)
+  # Apply user-declared types + force machine columns (CT numeric, Target Name categorical)
   split_df_typed <- reactive({
     req(split_df_live(), parsed_part_types())
     
     df <- split_df_live()
     types <- parsed_part_types()
     
+    # user-labeled parsed parts
     for (col in names(types)) {
-      if (!col %in% names(df)) next
-      
       if (types[[col]] == "numeric") {
         df[[col]] <- as.numeric(df[[col]])
       } else {
@@ -299,8 +307,13 @@ server <- function(input, output, session) {
       }
     }
     
+    # machine columns (always present)
+    df[["CT"]] <- as.numeric(df[["CT"]])
+    df[["Target Name"]] <- as.factor(df[["Target Name"]])
+    
     df
   })
+  
   
   # Render table (Tab 2) - SHOW TYPED DF
   output$sample_parse_preview <- renderDT({
@@ -337,7 +350,7 @@ server <- function(input, output, session) {
     
     selectInput(
       inputId  = "gapdh_group_cols",
-      label    = "Columns that define a sample (from parsed Sample Name)",
+      label    = "Column that defines a sample (e.g. ID)",
       choices  = parsed_part_cols(),
       selected = NULL,
       multiple = TRUE
