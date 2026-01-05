@@ -81,7 +81,7 @@ ui <- fluidPage(
             label   = "I confirm the parsed columns look correct.",
             value   = FALSE
           ),
-          actionButton("continue_to_tab3", "Continue to Tab 3", class = "btn-primary")
+          actionButton("continue_to_tab3", "Continue", class = "btn-primary")
         ),
         column(
           6,
@@ -174,6 +174,9 @@ server <- function(input, output, session) {
   # Approved store
   approved_data <- reactiveVal(NULL)
   
+  # FREEZE parsed+typed data when moving to Tab 3
+  parsed_data <- reactiveVal(NULL)
+  
   #Tab locks
   observeEvent(input$continue_btn, {
     validate(
@@ -186,7 +189,7 @@ server <- function(input, output, session) {
       ntc  = qpcr()$ntc
     ))
     
-    updateCheckboxInput(session, "parse_ok", value = FALSE)  # <-- ADD THIS
+    updateCheckboxInput(session, "parse_ok", value = FALSE)
     
     shinyjs::enable(selector = 'a[data-value="parse"]')
     updateTabsetPanel(session, "page", selected = "parse")
@@ -201,14 +204,29 @@ server <- function(input, output, session) {
     
     tagList(
       lapply(1:k, function(i) {
-        textInput(
-          inputId = paste0("part_label_", i),
-          label   = paste0("Part ", i, " label"),
-          value   = paste0("part", i)
+        fluidRow(
+          column(
+            6,
+            textInput(
+              inputId = paste0("part_label_", i),
+              label   = paste0("Part ", i, " label"),
+              value   = paste0("part", i)
+            )
+          ),
+          column(
+            6,
+            selectInput(
+              inputId = paste0("part_type_", i),
+              label   = paste0("Part ", i, " data type"),
+              choices = c("Categorical" = "categorical", "Continuous numeric" = "numeric"),
+              selected = "categorical"
+            )
+          )
         )
       })
     )
   })
+  
   
   # tab 2: live split df (calls helper)
   split_df_live <- reactive({
@@ -233,52 +251,101 @@ server <- function(input, output, session) {
     )
   })
   
-  # Render table (Tab 2)
-  output$sample_parse_preview <- renderDT({
-    req(split_df_live())
+  # Save labels created by user
+  parsed_part_cols <- reactive({
+    req(input$expected_parts)
     
-    DT::datatable(
-      split_df_live(),
-      rownames = FALSE,
-      options = list(scrollX = TRUE, pageLength = 25, lengthMenu = c(25, 50, 100))
+    vapply(
+      1:input$expected_parts,
+      function(i) {
+        lbl <- input[[paste0("part_label_", i)]]
+        if (!is.null(lbl) && nzchar(lbl)) lbl else paste0("part", i)
+      },
+      character(1)
     )
   })
   
-  output$parse_status <- renderPrint({
-    req(split_df_live())
-    paste("Rows in preview:", nrow(split_df_live()))
+  parsed_part_types <- reactive({
+    req(input$expected_parts)
+    
+    part_names <- parsed_part_cols()
+    
+    types <- vapply(
+      1:input$expected_parts,
+      function(i) {
+        t <- input[[paste0("part_type_", i)]]
+        if (!is.null(t) && nzchar(t)) t else "categorical"
+      },
+      character(1)
+    )
+    
+    stats::setNames(types, part_names)
   })
+  
+  # APPLY types to the parsed columns (this drives the Tab 2 preview)
+  split_df_typed <- reactive({
+    req(split_df_live(), parsed_part_types())
+    
+    df <- split_df_live()
+    types <- parsed_part_types()
+    
+    for (col in names(types)) {
+      if (!col %in% names(df)) next
+      
+      if (types[[col]] == "numeric") {
+        df[[col]] <- as.numeric(df[[col]])
+      } else {
+        df[[col]] <- as.factor(df[[col]])
+      }
+    }
+    
+    df
+  })
+  
+  # Render table (Tab 2) - SHOW TYPED DF
+  output$sample_parse_preview <- renderDT({
+    req(split_df_typed())
+    
+    DT::datatable(
+      split_df_typed(),
+      rownames = FALSE,
+      options = list(scrollX = TRUE, pageLength = 10, lengthMenu = c(10, 25, 100))
+    )
+  })
+  
   
   # =========================
   # Tab 3) Match identifiers for delta delta ct calc
   # =========================
   
-  # Enable Tab 3 once Tab 2 has a valid parsed df
   # Enable + navigate to Tab 3 only after user confirms Tab 2 looks good
   observeEvent(input$continue_to_tab3, {
     validate(
       need(isTRUE(input$parse_ok), "Check the confirmation box before continuing.")
     )
     
+    # FREEZE/SAVE the parsed+typed df at the moment user proceeds
+    parsed_data(split_df_typed())
+    
     shinyjs::enable(selector = 'a[data-value="review_match"]')
     updateTabsetPanel(session, "page", selected = "review_match")
   })
   
-  
-  # Tab 3: 
+  # Tab 3:
   output$gapdh_group_cols_ui <- renderUI({
-    req(split_df_live())
+    req(parsed_data(), parsed_part_cols())
+    
     selectInput(
       inputId  = "gapdh_group_cols",
-      label    = "Columns that define a sample (grouping columns)",
-      choices  = names(split_df_live()),
+      label    = "Columns that define a sample (from parsed Sample Name)",
+      choices  = parsed_part_cols(),
       selected = NULL,
       multiple = TRUE
     )
   })
   
   output$review_match_status <- renderPrint({
-    req(split_df_live())
+    req(parsed_data())
     
     if (identical(input$multi_gapdh, "yes")) {
       if (is.null(input$gapdh_group_cols) || length(input$gapdh_group_cols) == 0) {
