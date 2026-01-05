@@ -15,7 +15,9 @@ ui <- fluidPage(
   tabsetPanel(
     id = "page",
     
-    # Page 1
+    # =========================
+    # TAB 1) Import
+    # =========================
     tabPanel(
       title = "1) Import",
       value = "import",
@@ -52,7 +54,9 @@ ui <- fluidPage(
       )
     ),
     
-    # Page 2
+    # =========================
+    # TAB 2:UI) Parse Sample Names
+    # =========================
     tabPanel(
       title = "2) Parse Sample Names",
       value = "parse",
@@ -69,7 +73,15 @@ ui <- fluidPage(
             min     = 2
           ),
           tags$hr(),
-          uiOutput("part_labels_ui")
+          uiOutput("part_labels_ui"),
+          
+          tags$hr(),
+          checkboxInput(
+            inputId = "parse_ok",
+            label   = "I confirm the parsed columns look correct.",
+            value   = FALSE
+          ),
+          actionButton("continue_to_tab3", "Continue to Tab 3", class = "btn-primary")
         ),
         column(
           6,
@@ -80,6 +92,35 @@ ui <- fluidPage(
       
       tags$hr(),
       verbatimTextOutput("parse_status")
+    ),
+    
+    
+    
+    # =========================
+    # TAB 3:UI) Match / Continue from Tab 2
+    # =========================
+    tabPanel(
+      title = "3) Review & Match",
+      value = "review_match",
+      h4("Reference gene setup (GAPDH)"),
+      
+      radioButtons(
+        inputId = "multi_gapdh",
+        label   = "Does your individual sample have multiple GAPDH measurements?",
+        choices = c("No" = "no", "Yes" = "yes"),
+        selected = "no",
+        inline   = TRUE
+      ),
+      
+      conditionalPanel(
+        condition = "input.multi_gapdh == 'yes'",
+        tags$hr(),
+        helpText("Select the column(s) from Tab 2 that identify which rows/measurements belong to the same sample for GAPDH."),
+        uiOutput("gapdh_group_cols_ui")
+      ),
+      
+      tags$hr(),
+      verbatimTextOutput("review_match_status")
     )
   )
 )
@@ -87,9 +128,10 @@ ui <- fluidPage(
 # SERVER ----
 server <- function(input, output, session) {
   
-  # Disable tab 2 until Continue succeeds
+  # Disable Tabs 2 and 3 until Continue succeeds
   observe({
     shinyjs::disable(selector = 'a[data-value="parse"]')
+    shinyjs::disable(selector = 'a[data-value="review_match"]')
   })
   
   # Upload UI
@@ -110,8 +152,9 @@ server <- function(input, output, session) {
       combine_multiple = identical(input$combine_files, "TRUE")
     )
   })
-  
-  # Page 1 preview
+  # =========================
+  # TAB 1) preview
+  # =========================
   output$data_preview <- renderDT({
     req(qpcr())
     
@@ -131,6 +174,7 @@ server <- function(input, output, session) {
   # Approved store
   approved_data <- reactiveVal(NULL)
   
+  #Tab locks
   observeEvent(input$continue_btn, {
     validate(
       need(!is.null(input$raw_files), "Upload file(s) first."),
@@ -142,11 +186,15 @@ server <- function(input, output, session) {
       ntc  = qpcr()$ntc
     ))
     
+    updateCheckboxInput(session, "parse_ok", value = FALSE)  # <-- ADD THIS
+    
     shinyjs::enable(selector = 'a[data-value="parse"]')
     updateTabsetPanel(session, "page", selected = "parse")
   })
   
-  # Page 2: dynamic label inputs
+  # =========================
+  # Tab 2) dynamic label inputs
+  # =========================
   output$part_labels_ui <- renderUI({
     req(input$expected_parts)
     k <- input$expected_parts
@@ -162,7 +210,7 @@ server <- function(input, output, session) {
     )
   })
   
-  # Page 2: live split df (calls helper)
+  # tab 2: live split df (calls helper)
   split_df_live <- reactive({
     req(approved_data(), input$expected_parts)
     
@@ -185,7 +233,7 @@ server <- function(input, output, session) {
     )
   })
   
-  # Render table
+  # Render table (Tab 2)
   output$sample_parse_preview <- renderDT({
     req(split_df_live())
     
@@ -199,6 +247,50 @@ server <- function(input, output, session) {
   output$parse_status <- renderPrint({
     req(split_df_live())
     paste("Rows in preview:", nrow(split_df_live()))
+  })
+  
+  # =========================
+  # Tab 3) Match identifiers for delta delta ct calc
+  # =========================
+  
+  # Enable Tab 3 once Tab 2 has a valid parsed df
+  # Enable + navigate to Tab 3 only after user confirms Tab 2 looks good
+  observeEvent(input$continue_to_tab3, {
+    validate(
+      need(isTRUE(input$parse_ok), "Check the confirmation box before continuing.")
+    )
+    
+    shinyjs::enable(selector = 'a[data-value="review_match"]')
+    updateTabsetPanel(session, "page", selected = "review_match")
+  })
+  
+  
+  # Tab 3: 
+  output$gapdh_group_cols_ui <- renderUI({
+    req(split_df_live())
+    selectInput(
+      inputId  = "gapdh_group_cols",
+      label    = "Columns that define a sample (grouping columns)",
+      choices  = names(split_df_live()),
+      selected = NULL,
+      multiple = TRUE
+    )
+  })
+  
+  output$review_match_status <- renderPrint({
+    req(split_df_live())
+    
+    if (identical(input$multi_gapdh, "yes")) {
+      if (is.null(input$gapdh_group_cols) || length(input$gapdh_group_cols) == 0) {
+        return("Multiple GAPDH: select at least one grouping column.")
+      }
+      paste(
+        "Multiple GAPDH: grouping columns selected:",
+        paste(input$gapdh_group_cols, collapse = ", ")
+      )
+    } else {
+      "Single GAPDH per sample selected."
+    }
   })
   
   # Status message
