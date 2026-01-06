@@ -7,7 +7,17 @@ library(janitor)
 library(shinyjs)
 
 
-## UI ----
+library(shiny)
+library(readxl)
+library(openxlsx)
+library(dplyr)
+library(DT)
+library(janitor)
+library(shinyjs)
+
+## =========================
+## UI
+## =========================
 ui <- fluidPage(
   shinyjs::useShinyjs(),
   titlePanel("Auto-qPCR"),
@@ -15,37 +25,37 @@ ui <- fluidPage(
   tabsetPanel(
     id = "page",
     
-    # =========================
-    # TAB 1) Import
-    # =========================
+    # ============================================================
+    # TAB 1) Import raw qPCR files + header confirmation
+    # ============================================================
     tabPanel(
       title = "1) Import",
       value = "import",
       sidebarLayout(
         sidebarPanel(
           radioButtons(
-            inputId = "combine_files",
-            label   = "Do you have multiple qPCR files that should be combined?",
+            "combine_files",
+            "Do you have multiple qPCR files that should be combined?",
             choices = c("No (single file)" = FALSE, "Yes (multiple files)" = TRUE),
             selected = FALSE
           ),
           uiOutput("file_upload_ui"),
           tags$hr(),
           checkboxInput(
-            inputId = "header_ok",
-            label   = "I confirm the header row and first data row look correct.",
-            value   = FALSE
+            "header_ok",
+            "I confirm the header row and first data row look correct.",
+            FALSE
           ),
           actionButton("continue_btn", "Continue", class = "btn-primary")
         ),
         mainPanel(
           h4("Data Preview"),
           radioButtons(
-            inputId = "preview_table",
-            label   = "Preview table",
+            "preview_table",
+            "Preview table",
             choices = c("Main data (NTC removed)" = "main", "NTC rows only" = "ntc"),
             selected = "main",
-            inline   = TRUE
+            inline = TRUE
           ),
           DTOutput("data_preview"),
           tags$hr(),
@@ -54,9 +64,9 @@ ui <- fluidPage(
       )
     ),
     
-    # =========================
-    # TAB 2:UI) Parse Sample Names
-    # =========================
+    # ============================================================
+    # TAB 2) Parse Sample Name + define reference structure
+    # ============================================================
     tabPanel(
       title = "2) Parse Sample Names",
       value = "parse",
@@ -65,21 +75,42 @@ ui <- fluidPage(
       fluidRow(
         column(
           6,
-          helpText("Expected format: 1_w_x_y ... (underscore-delimited)."),
           numericInput(
-            inputId = "expected_parts",
-            label   = "How many underscore-delimited parts should there be?",
-            value   = 4,
-            min     = 2
+            "expected_parts",
+            "How many underscore-delimited parts?",
+            value = 4,
+            min = 2
           ),
           tags$hr(),
+          
           uiOutput("part_labels_ui"),
+          tags$hr(),
+          
+          h4("Reference gene setup"),
+          
+          radioButtons(
+            "multi_gapdh",
+            "Does your individual sample have multiple GAPDH measurements?",
+            choices = c("No" = "no", "Yes" = "yes"),
+            selected = "no",
+            inline = TRUE
+          ),
+          
+          uiOutput("gapdh_group_cols_ui"),
+          
+          tags$hr(),
+          selectInput(
+            "ref_gene",
+            "Select reference (normalization) gene",
+            choices = NULL,
+            multiple = FALSE
+          ),
           
           tags$hr(),
           checkboxInput(
-            inputId = "parse_ok",
-            label   = "I confirm the parsed columns look correct.",
-            value   = FALSE
+            "parse_ok",
+            "I confirm the parsed columns and reference setup look correct.",
+            FALSE
           ),
           actionButton("continue_to_tab3", "Continue", class = "btn-primary")
         ),
@@ -88,144 +119,113 @@ ui <- fluidPage(
           h5("Parsed preview (updates live)"),
           DTOutput("sample_parse_preview")
         )
-      ),
-      
-      tags$hr(),
-      verbatimTextOutput("parse_status")
+      )
     ),
     
-    
-    
-    # =========================
-    # TAB 3:UI) Match / Continue from Tab 2
-    # =========================
+    # ============================================================
+    # TAB 3) Review + save long format table
+    # ============================================================
     tabPanel(
-      title = "3) Review & Match",
+      title = "3) Review",
       value = "review_match",
-      h4("Reference gene setup (GAPDH)"),
-      
-      radioButtons(
-        inputId = "multi_gapdh",
-        label   = "Does your individual sample have multiple GAPDH measurements?",
-        choices = c("No" = "no", "Yes" = "yes"),
-        selected = "no",
-        inline   = TRUE
-      ),
-      
-      conditionalPanel(
-        condition = "input.multi_gapdh == 'yes'",
-        tags$hr(),
-        tags$p(
-          "Select the column(s) from Tab 2 that identify which rows/measurements belong to the same sample for GAPDH."
-        ),
-        tags$p(
-          tags$em("For example, if a single individual contributes to multiple tissues, select the columns that identify the individual and the tissue.")
-        )
-      ),
-        
-        uiOutput("gapdh_group_cols_ui"),
-        
-
-      
+      h4("Reference configuration summary"),
+      verbatimTextOutput("review_match_status"),
       tags$hr(),
-      verbatimTextOutput("review_match_status")
+      h4("Save output (long format)"),
+      
+      textInput(
+        "out_title",
+        "Output table title (used for filename)",
+        value = ""
+      ),
+      
+      actionButton("save_csv", "Save CSV", class = "btn-primary"),
+      DTOutput("ctref_preview"),
+      checkboxInput(
+        "save_ok",
+        "I confirm this table is correct and should be saved as a CSV.",
+        value = FALSE
+      ),
+      verbatimTextOutput("save_status")
     )
   )
 )
 
-# SERVER ----
+## =========================
+## SERVER
+## =========================
 server <- function(input, output, session) {
   
-  # Disable Tabs 2 and 3 until Continue succeeds
+  # ------------------------------------------------------------
+  # Global tab locks (only unlock when prerequisites met)
+  # ------------------------------------------------------------
   observe({
     shinyjs::disable(selector = 'a[data-value="parse"]')
     shinyjs::disable(selector = 'a[data-value="review_match"]')
   })
   
-  # Upload UI
+  # ------------------------------------------------------------
+  # TAB 1) File upload + preprocessing
+  # ------------------------------------------------------------
   output$file_upload_ui <- renderUI({
     if (identical(input$combine_files, "TRUE")) {
-      fileInput("raw_files", "Upload qPCR .xls files", multiple = TRUE, accept = c(".xls"))
+      fileInput("raw_files", "Upload qPCR .xls files", multiple = TRUE, accept = ".xls")
     } else {
-      fileInput("raw_files", "Upload a qPCR .xls file", multiple = FALSE, accept = c(".xls"))
+      fileInput("raw_files", "Upload a qPCR .xls file", multiple = FALSE, accept = ".xls")
     }
   })
   
-  # Preprocess
   qpcr <- reactive({
     req(input$raw_files)
-    
     preprocess_qpcr_files(
       files = input$raw_files,
       combine_multiple = identical(input$combine_files, "TRUE")
     )
   })
-  # =========================
-  # TAB 1) preview
-  # =========================
+  
   output$data_preview <- renderDT({
     req(qpcr())
-    
-    preview_df <- if (identical(input$preview_table, "ntc")) qpcr()$ntc else qpcr()$main
-    
-    DT::datatable(
-      preview_df,
-      options = list(
-        scrollY = "400px",
-        scrollX = TRUE,
-        pageLength = 10,
-        lengthMenu = c(10, 25, 50)
-      )
-    )
+    df <- if (input$preview_table == "ntc") qpcr()$ntc else qpcr()$main
+    DT::datatable(df, rownames = FALSE, options = list(scrollX = TRUE))
   })
   
-  # Approved store
   approved_data <- reactiveVal(NULL)
+  parsed_data   <- reactiveVal(NULL)
   
-  # FREEZE parsed+typed data when moving to Tab 3
-  parsed_data <- reactiveVal(NULL)
-  
-  #Tab locks
   observeEvent(input$continue_btn, {
     validate(
       need(!is.null(input$raw_files), "Upload file(s) first."),
-      need(isTRUE(input$header_ok), "Confirm the header row before continuing.")
+      need(isTRUE(input$header_ok), "Confirm the header row.")
     )
     
-    approved_data(list(
-      data = qpcr()$main,
-      ntc  = qpcr()$ntc
-    ))
-    
-    updateCheckboxInput(session, "parse_ok", value = FALSE)
-    
+    approved_data(qpcr()$main)
     shinyjs::enable(selector = 'a[data-value="parse"]')
     updateTabsetPanel(session, "page", selected = "parse")
   })
   
-  # =========================
-  # Tab 2) dynamic label inputs
-  # =========================
+  # ------------------------------------------------------------
+  # TAB 2) Parsing logic
+  # ------------------------------------------------------------
   output$part_labels_ui <- renderUI({
     req(input$expected_parts)
     k <- input$expected_parts
     
     tagList(
-      lapply(1:k, function(i) {
+      lapply(seq_len(k), function(i) {
         fluidRow(
           column(
             6,
             textInput(
-              inputId = paste0("part_label_", i),
-              label   = paste0("Part ", i, " label"),
-              value   = paste0("part", i)
+              paste0("part_label_", i),
+              paste("Part", i, "label"),
+              value = paste0("part", i)
             )
           ),
           column(
             6,
             selectInput(
-              inputId = paste0("part_type_", i),
-              label   = paste0("Part ", i, " data type"),
+              paste0("part_type_", i),
+              paste("Part", i, "data type"),
               choices = c("Categorical" = "categorical", "Continuous numeric" = "numeric"),
               selected = "categorical"
             )
@@ -235,156 +235,189 @@ server <- function(input, output, session) {
     )
   })
   
+  parsed_part_cols <- reactive({
+    req(input$expected_parts)
+    vapply(seq_len(input$expected_parts), function(i) {
+      lbl <- input[[paste0("part_label_", i)]]
+      if (!is.null(lbl) && nzchar(lbl)) lbl else paste0("part", i)
+    }, character(1))
+  })
   
-  # tab 2: live split df (calls helper)
-  split_df_live <- reactive({
-    req(approved_data(), input$expected_parts)
-    
-    k <- input$expected_parts
-    
-    part_labels <- vapply(
-      1:k,
-      function(i) {
-        lbl <- input[[paste0("part_label_", i)]]
-        if (!is.null(lbl) && nzchar(lbl)) lbl else paste0("part", i)
-      },
-      character(1)
+  parsed_part_types <- reactive({
+    req(input$expected_parts, parsed_part_cols())
+    stats::setNames(
+      vapply(seq_len(input$expected_parts), function(i) {
+        t <- input[[paste0("part_type_", i)]]
+        if (!is.null(t) && nzchar(t)) t else "categorical"
+      }, character(1)),
+      parsed_part_cols()
     )
+  })
+  
+  # ---- live split (GATED: will not run until approved_data exists) ----
+  split_df_live <- reactive({
+    req(approved_data(), parsed_part_cols(), input$expected_parts)
     
     split_sample_name(
-      df = approved_data()$data,
-      n_parts = k,
-      part_labels = part_labels,
+      df = approved_data(),
+      n_parts = input$expected_parts,
+      part_labels = parsed_part_cols(),
       keep_sample_name = FALSE
     )
   })
   
-  # Save labels created by user
-  parsed_part_cols <- reactive({
-    req(input$expected_parts)
-    
-    vapply(
-      1:input$expected_parts,
-      function(i) {
-        lbl <- input[[paste0("part_label_", i)]]
-        if (!is.null(lbl) && nzchar(lbl)) lbl else paste0("part", i)
-      },
-      character(1)
-    )
-  })
-  
-  parsed_part_types <- reactive({
-    req(input$expected_parts)
-    
-    part_names <- parsed_part_cols()
-    
-    types <- vapply(
-      1:input$expected_parts,
-      function(i) {
-        t <- input[[paste0("part_type_", i)]]
-        if (!is.null(t) && nzchar(t)) t else "categorical"
-      },
-      character(1)
-    )
-    
-    stats::setNames(types, part_names)
-  })
-  
-  # APPLY types to the parsed columns (this drives the Tab 2 preview)
-  # Apply user-declared types + force machine columns (CT numeric, Target Name categorical)
+  # ---- typed split (GATED) ----
   split_df_typed <- reactive({
     req(split_df_live(), parsed_part_types())
     
     df <- split_df_live()
-    types <- parsed_part_types()
     
-    # user-labeled parsed parts
-    for (col in names(types)) {
-      if (types[[col]] == "numeric") {
+    for (col in names(parsed_part_types())) {
+      if (parsed_part_types()[[col]] == "numeric") {
         df[[col]] <- as.numeric(df[[col]])
       } else {
         df[[col]] <- as.factor(df[[col]])
       }
     }
     
-    # machine columns (always present)
-    df[["CT"]] <- as.numeric(df[["CT"]])
-    df[["Target Name"]] <- as.factor(df[["Target Name"]])
-    
+    df$CT <- as.numeric(df$CT)
+    df$`Target Name` <- as.factor(df$`Target Name`)
     df
   })
   
-  
-  # Render table (Tab 2) - SHOW TYPED DF
+  # preview table (GATED)
   output$sample_parse_preview <- renderDT({
     req(split_df_typed())
-    
-    DT::datatable(
-      split_df_typed(),
-      rownames = FALSE,
-      options = list(scrollX = TRUE, pageLength = 10, lengthMenu = c(10, 25, 100))
-    )
+    DT::datatable(split_df_typed(), rownames = FALSE, options = list(scrollX = TRUE))
   })
   
+  # ------------------------------------------------------------
+  # Reference grouping + gene selection
+  # ------------------------------------------------------------
+  output$gapdh_group_cols_ui <- renderUI({
+    req(parsed_part_cols())
+    
+    if (input$multi_gapdh == "yes") {
+      selectInput(
+        "gapdh_group_cols",
+        "Grouping column(s) for GAPDH",
+        choices = parsed_part_cols(),
+        multiple = TRUE
+      )
+    } else {
+      selectInput(
+        "gapdh_group_cols",
+        "Sample column for GAPDH",
+        choices = parsed_part_cols(),
+        multiple = FALSE
+      )
+    }
+  })
   
-  # =========================
-  # Tab 3) Match identifiers for delta delta ct calc
-  # =========================
+  # populate reference gene choices dynamically (DO NOT fire on init)
+  observeEvent(split_df_typed(), {
+    updateSelectInput(
+      session,
+      "ref_gene",
+      choices = sort(unique(as.character(split_df_typed()[["Target Name"]]))),
+      selected = NULL
+    )
+  }, ignoreInit = TRUE)
   
-  # Enable + navigate to Tab 3 only after user confirms Tab 2 looks good
+  # ------------------------------------------------------------
+  # Freeze parsed data + proceed
+  # ------------------------------------------------------------
   observeEvent(input$continue_to_tab3, {
     validate(
-      need(isTRUE(input$parse_ok), "Check the confirmation box before continuing.")
+      need(isTRUE(input$parse_ok), "Confirm before continuing."),
+      need(!is.null(input$gapdh_group_cols) && length(input$gapdh_group_cols) >= 1,
+           "Select sample grouping column(s)."),
+      need(
+        input$multi_gapdh == "no" || length(input$gapdh_group_cols) > 1,
+        "Multiple GAPDH requires more than one grouping column."
+      ),
+      need(!is.null(input$ref_gene) && nzchar(input$ref_gene), "Select a reference gene.")
     )
     
-    # FREEZE/SAVE the parsed+typed df at the moment user proceeds
     parsed_data(split_df_typed())
-    
     shinyjs::enable(selector = 'a[data-value="review_match"]')
     updateTabsetPanel(session, "page", selected = "review_match")
   })
   
-  # Tab 3:
-  output$gapdh_group_cols_ui <- renderUI({
-    req(parsed_data(), parsed_part_cols())
+  # ------------------------------------------------------------
+  # Create ct_ref column (core normalization prep)
+  # ------------------------------------------------------------
+  data_with_ct_ref <- eventReactive(input$continue_to_tab3, {
+    req(parsed_data(), input$ref_gene, input$gapdh_group_cols)
     
-    selectInput(
-      inputId  = "gapdh_group_cols",
-      label    = "Column that defines a sample (e.g. ID)",
-      choices  = parsed_part_cols(),
-      selected = NULL,
-      multiple = TRUE
+    df <- parsed_data()
+    
+    ref_df <- df %>%
+      dplyr::filter(`Target Name` == input$ref_gene) %>%
+      dplyr::select(
+        dplyr::all_of(input$gapdh_group_cols),
+        ct_ref = CT
+      )
+    
+    df %>%
+      dplyr::left_join(ref_df, by = input$gapdh_group_cols) %>%
+      dplyr::filter(`Target Name` != input$ref_gene)
+  })
+  
+  # ------------------------------------------------------------
+  # TAB 3) Final Long table preview + save
+  # ------------------------------------------------------------
+  output$ctref_preview <- renderDT({
+    req(data_with_ct_ref())
+    
+    DT::datatable(
+      data_with_ct_ref(),
+      rownames = FALSE,
+      options = list(scrollX = TRUE, pageLength = 10, lengthMenu = c(10, 25, 50, 100))
     )
   })
   
-  output$review_match_status <- renderPrint({
-    req(parsed_data())
+  observeEvent(input$save_csv, {
+    req(data_with_ct_ref())
+    req(isTRUE(input$save_ok))
+    req(nzchar(input$out_title))
     
-    if (identical(input$multi_gapdh, "yes")) {
-      if (is.null(input$gapdh_group_cols) || length(input$gapdh_group_cols) == 0) {
-        return("Multiple GAPDH: select at least one grouping column.")
-      }
+    out_dir <- file.path("data", "output", "long")
+    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+    
+    safe_name <- gsub("[^A-Za-z0-9_-]+", "_", input$out_title)
+    out_path <- file.path(out_dir, paste0(safe_name, ".csv"))
+    
+    write.csv(data_with_ct_ref(), out_path, row.names = FALSE)
+    
+    # transient popup notification
+    showNotification(
+      paste("File saved:", out_path),
+      type = "message",
+      duration = 6
+    )
+    
+    # persistent status text
+    output$save_status <- renderText({
       paste(
-        "Multiple GAPDH: grouping columns selected:",
-        paste(input$gapdh_group_cols, collapse = ", ")
+        "Saved successfully:",
+        out_path,
+        "\nRows:", nrow(data_with_ct_ref()),
+        "\nTime:", format(Sys.time(), "%Y-%m-%d %H:%M:%S")
       )
-    } else {
-      "Single GAPDH per sample selected."
-    }
+    })
   })
   
-  # Status message
+  
+  
+  
   output$status_msg <- renderPrint({
-    if (is.null(input$raw_files)) {
-      "Upload file(s) to begin."
-    } else if (!isTRUE(input$header_ok)) {
-      "Review the preview and confirm the header row."
-    } else if (is.null(approved_data())) {
-      "Ready. Click Continue."
-    } else {
-      "Header confirmed. Proceeding to analysis."
-    }
+    if (is.null(input$raw_files)) "Upload file(s) to begin."
+    else if (!isTRUE(input$header_ok)) "Confirm the header row."
+    else "Ready."
   })
 }
 
 shinyApp(ui, server)
+
+
