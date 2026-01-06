@@ -8,9 +8,19 @@
 renv/library/
 renv/python/
 
-# Shiny user data
-data/raw/
-data/output/
+# Ignore everything inside these directories
+data/raw/*
+data/output/long/*
+data/output/wide/*
+
+# keep the directories themselves
+!data/raw/
+!data/output/
+
+# And keep a README
+!data/raw/README.md
+!data/output/long/README.md
+!data/output/wide/README.md
 
 # Logs
 shinylogs/
