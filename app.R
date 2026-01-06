@@ -6,15 +6,6 @@ library(DT)
 library(janitor)
 library(shinyjs)
 
-
-library(shiny)
-library(readxl)
-library(openxlsx)
-library(dplyr)
-library(DT)
-library(janitor)
-library(shinyjs)
-
 ## =========================
 ## UI
 ## =========================
@@ -90,7 +81,7 @@ ui <- fluidPage(
           
           radioButtons(
             "multi_gapdh",
-            "Does your individual sample have multiple GAPDH measurements?",
+            "Does an individual contribute multiple GAPDH measurements? (e.g. mouse 1 has different GAPDH for each tissue)",
             choices = c("No" = "no", "Yes" = "yes"),
             selected = "no",
             inline = TRUE
@@ -139,7 +130,6 @@ ui <- fluidPage(
       tags$hr(),
       h4("Save output (long format)"),
       
-      # --- bottom save controls ---
       textInput(
         "out_title",
         "Output table title (used for filename)",
@@ -263,7 +253,7 @@ server <- function(input, output, session) {
     )
   })
   
-  # ---- live split (GATED: will not run until approved_data exists) ----
+  # ---- live split (GATED) ----
   split_df_live <- reactive({
     req(approved_data(), parsed_part_cols(), input$expected_parts)
     
@@ -294,7 +284,6 @@ server <- function(input, output, session) {
     df
   })
   
-  # preview table (GATED)
   output$sample_parse_preview <- renderDT({
     req(split_df_typed())
     DT::datatable(split_df_typed(), rownames = FALSE, options = list(scrollX = TRUE))
@@ -305,22 +294,40 @@ server <- function(input, output, session) {
   # ------------------------------------------------------------
   output$gapdh_group_cols_ui <- renderUI({
     req(parsed_part_cols())
+    cols <- parsed_part_cols()
     
     if (input$multi_gapdh == "yes") {
       selectInput(
-        "gapdh_group_cols",
-        "Grouping column(s) for GAPDH",
-        choices = parsed_part_cols(),
-        multiple = TRUE
+        inputId   = "gapdh_group_cols",
+        label     = "Select the columns that define a unique GAPDH measurement",
+        choices   = cols,
+        selected  = character(0),     # no default selection
+        multiple  = TRUE,
+        selectize = TRUE
       )
     } else {
       selectInput(
-        "gapdh_group_cols",
-        "Sample column for GAPDH",
-        choices = parsed_part_cols(),
-        multiple = FALSE
+        inputId   = "gapdh_group_cols",
+        label     = "Sample ID column for GAPDH",
+        choices   = c("— Select a column —" = "", stats::setNames(cols, cols)),
+        selected  = "",               # force placeholder default
+        multiple  = FALSE,
+        selectize = TRUE
       )
     }
+  })
+  
+  # Disable Tab 2 continue until GAPDH grouping is selected (and not placeholder)
+  observe({
+    shinyjs::disable("continue_to_tab3")
+  })
+  
+  observe({
+    cols_ok <- !is.null(input$gapdh_group_cols) &&
+      length(input$gapdh_group_cols) >= 1 &&
+      !any(input$gapdh_group_cols == "")
+    
+    if (cols_ok) shinyjs::enable("continue_to_tab3") else shinyjs::disable("continue_to_tab3")
   })
   
   # populate reference gene choices dynamically (DO NOT fire on init)
@@ -339,8 +346,12 @@ server <- function(input, output, session) {
   observeEvent(input$continue_to_tab3, {
     validate(
       need(isTRUE(input$parse_ok), "Confirm before continuing."),
-      need(!is.null(input$gapdh_group_cols) && length(input$gapdh_group_cols) >= 1,
-           "Select sample grouping column(s)."),
+      need(
+        !is.null(input$gapdh_group_cols) &&
+          length(input$gapdh_group_cols) >= 1 &&
+          !any(input$gapdh_group_cols == ""),
+        "Select sample grouping column(s)."
+      ),
       need(
         input$multi_gapdh == "no" || length(input$gapdh_group_cols) > 1,
         "Multiple GAPDH requires more than one grouping column."
@@ -376,10 +387,6 @@ server <- function(input, output, session) {
   # ------------------------------------------------------------
   # TAB 3) Final Long table preview + save
   # ------------------------------------------------------------
-  # ------------------------------------------------------------
-  # TAB 3) Final Long table preview + save
-  # ------------------------------------------------------------
-  
   output$ctref_preview <- renderDT({
     req(data_with_ct_ref())
     
@@ -424,7 +431,6 @@ server <- function(input, output, session) {
     )
   })
   
-  
   output$status_msg <- renderPrint({
     if (is.null(input$raw_files)) "Upload file(s) to begin."
     else if (!isTRUE(input$header_ok)) "Confirm the header row."
@@ -433,5 +439,3 @@ server <- function(input, output, session) {
 }
 
 shinyApp(ui, server)
-
-
