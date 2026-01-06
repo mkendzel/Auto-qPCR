@@ -128,24 +128,33 @@ ui <- fluidPage(
     tabPanel(
       title = "3) Review",
       value = "review_match",
+      
       h4("Reference configuration summary"),
       verbatimTextOutput("review_match_status"),
+      
+      tags$hr(),
+      h4("Long format preview"),
+      DTOutput("ctref_preview"),
+      
       tags$hr(),
       h4("Save output (long format)"),
       
+      # --- bottom save controls ---
       textInput(
         "out_title",
         "Output table title (used for filename)",
         value = ""
       ),
       
-      actionButton("save_csv", "Save CSV", class = "btn-primary"),
-      DTOutput("ctref_preview"),
       checkboxInput(
         "save_ok",
         "I confirm this table is correct and should be saved as a CSV.",
         value = FALSE
       ),
+      
+      actionButton("save_csv", "Save CSV", class = "btn-primary"),
+      
+      tags$hr(),
       verbatimTextOutput("save_status")
     )
   )
@@ -367,6 +376,10 @@ server <- function(input, output, session) {
   # ------------------------------------------------------------
   # TAB 3) Final Long table preview + save
   # ------------------------------------------------------------
+  # ------------------------------------------------------------
+  # TAB 3) Final Long table preview + save
+  # ------------------------------------------------------------
+  
   output$ctref_preview <- renderDT({
     req(data_with_ct_ref())
     
@@ -375,6 +388,12 @@ server <- function(input, output, session) {
       rownames = FALSE,
       options = list(scrollX = TRUE, pageLength = 10, lengthMenu = c(10, 25, 50, 100))
     )
+  })
+  
+  save_status_val <- reactiveVal("")
+  
+  output$save_status <- renderText({
+    save_status_val()
   })
   
   observeEvent(input$save_csv, {
@@ -390,25 +409,20 @@ server <- function(input, output, session) {
     
     write.csv(data_with_ct_ref(), out_path, row.names = FALSE)
     
-    # transient popup notification
     showNotification(
       paste("File saved:", out_path),
       type = "message",
       duration = 6
     )
     
-    # persistent status text
-    output$save_status <- renderText({
+    save_status_val(
       paste(
-        "Saved successfully:",
-        out_path,
+        "Saved successfully:", out_path,
         "\nRows:", nrow(data_with_ct_ref()),
         "\nTime:", format(Sys.time(), "%Y-%m-%d %H:%M:%S")
       )
-    })
+    )
   })
-  
-  
   
   
   output$status_msg <- renderPrint({
