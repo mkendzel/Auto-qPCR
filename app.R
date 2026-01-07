@@ -66,6 +66,7 @@ ui <- fluidPage(
       fluidRow(
         column(
           6,
+          helpText("Expected format: 1_w_x_y ... (underscore-delimited)."),
           numericInput(
             "expected_parts",
             "How many underscore-delimited parts?",
@@ -382,7 +383,7 @@ server <- function(input, output, session) {
     
     selectInput(
       "ddct_id_col",
-      "Which parsed column is the unique Sample ID? (Excluded from Mock mean grouping)",
+      "Which parsed column is the unique Sample ID?",
       choices  = c("— Select a column —" = "", stats::setNames(cols, cols)),
       selected = "",
       multiple = FALSE,
