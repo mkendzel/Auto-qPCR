@@ -90,12 +90,14 @@ ui <- fluidPage(
           uiOutput("gapdh_group_cols_ui"),
           
           tags$hr(),
-          selectInput(
-            "ref_gene",
-            "Select reference (normalization) gene",
-            choices = NULL,
-            multiple = FALSE
-          ),
+          uiOutput("ref_gene_ui"),
+          
+          tags$hr(),
+          h4("Delta-Delta Ct setup (treatment + mock)"),
+          
+          uiOutput("treatment_col_ui"),
+          uiOutput("mock_value_ui"),
+          uiOutput("ddct_id_col_ui"),
           
           tags$hr(),
           checkboxInput(
@@ -154,6 +156,8 @@ ui <- fluidPage(
 ## SERVER
 ## =========================
 server <- function(input, output, session) {
+  
+  r3 <- function(x) round(x, 3)
   
   # ------------------------------------------------------------
   # Global tab locks (only unlock when prerequisites met)
@@ -253,7 +257,6 @@ server <- function(input, output, session) {
     )
   })
   
-  # ---- live split (GATED) ----
   split_df_live <- reactive({
     req(approved_data(), parsed_part_cols(), input$expected_parts)
     
@@ -265,7 +268,6 @@ server <- function(input, output, session) {
     )
   })
   
-  # ---- typed split (GATED) ----
   split_df_typed <- reactive({
     req(split_df_live(), parsed_part_types())
     
@@ -279,7 +281,8 @@ server <- function(input, output, session) {
       }
     }
     
-    df$CT <- as.numeric(df$CT)
+    # round CT on ingest (this is "rounding during calculations")
+    df$CT <- r3(as.numeric(df$CT))
     df$`Target Name` <- as.factor(df$`Target Name`)
     df
   })
@@ -290,7 +293,7 @@ server <- function(input, output, session) {
   })
   
   # ------------------------------------------------------------
-  # Reference grouping + gene selection
+  # GAPDH grouping
   # ------------------------------------------------------------
   output$gapdh_group_cols_ui <- renderUI({
     req(parsed_part_cols())
@@ -301,7 +304,7 @@ server <- function(input, output, session) {
         inputId   = "gapdh_group_cols",
         label     = "Select the columns that define a unique GAPDH measurement",
         choices   = cols,
-        selected  = character(0),     # no default selection
+        selected  = character(0),
         multiple  = TRUE,
         selectize = TRUE
       )
@@ -310,14 +313,96 @@ server <- function(input, output, session) {
         inputId   = "gapdh_group_cols",
         label     = "Sample ID column for GAPDH",
         choices   = c("— Select a column —" = "", stats::setNames(cols, cols)),
-        selected  = "",               # force placeholder default
+        selected  = "",
         multiple  = FALSE,
         selectize = TRUE
       )
     }
   })
   
-  # Disable Tab 2 continue until GAPDH grouping is selected (and not placeholder)
+  # ------------------------------------------------------------
+  # Reference gene selector (placeholder + forced selection)
+  # ------------------------------------------------------------
+  output$ref_gene_ui <- renderUI({
+    req(split_df_typed())
+    genes <- sort(unique(as.character(split_df_typed()[["Target Name"]])))
+    
+    selectInput(
+      "ref_gene",
+      "Select reference (normalization) gene",
+      choices  = c("— Select a gene —" = "", stats::setNames(genes, genes)),
+      selected = "",
+      multiple = FALSE,
+      selectize = TRUE
+    )
+  })
+  
+  observeEvent(split_df_typed(), {
+    updateSelectInput(session, "ref_gene", selected = "")
+  }, ignoreInit = TRUE)
+  
+  # ------------------------------------------------------------
+  # ddCt setup (treatment + mock + unique id to exclude)
+  # ------------------------------------------------------------
+  output$treatment_col_ui <- renderUI({
+    req(parsed_part_cols())
+    cols <- parsed_part_cols()
+    
+    selectInput(
+      "treatment_col",
+      "Which parsed column stores the treatment?",
+      choices  = c("— Select a column —" = "", stats::setNames(cols, cols)),
+      selected = "",
+      multiple = FALSE,
+      selectize = TRUE
+    )
+  })
+  
+  output$mock_value_ui <- renderUI({
+    req(split_df_typed())
+    req(!is.null(input$treatment_col))
+    
+    if (!nzchar(input$treatment_col)) return(NULL)
+    
+    vals <- sort(unique(as.character(split_df_typed()[[input$treatment_col]])))
+    
+    selectInput(
+      "mock_value",
+      "Which value represents the Mock control?",
+      choices  = c("— Select Mock —" = "", stats::setNames(vals, vals)),
+      selected = "",
+      multiple = FALSE,
+      selectize = TRUE
+    )
+  })
+  
+  output$ddct_id_col_ui <- renderUI({
+    req(parsed_part_cols())
+    cols <- parsed_part_cols()
+    
+    selectInput(
+      "ddct_id_col",
+      "Which parsed column is the unique Sample ID? (Excluded from Mock mean grouping)",
+      choices  = c("— Select a column —" = "", stats::setNames(cols, cols)),
+      selected = "",
+      multiple = FALSE,
+      selectize = TRUE
+    )
+  })
+  
+  observeEvent(input$treatment_col, {
+    updateSelectInput(session, "mock_value", selected = "")
+  }, ignoreInit = TRUE)
+  
+  observeEvent(split_df_typed(), {
+    updateSelectInput(session, "treatment_col", selected = "")
+    updateSelectInput(session, "mock_value", selected = "")
+    updateSelectInput(session, "ddct_id_col", selected = "")
+  }, ignoreInit = TRUE)
+  
+  # ------------------------------------------------------------
+  # Disable Tab 2 continue until prerequisites met
+  # ------------------------------------------------------------
   observe({
     shinyjs::disable("continue_to_tab3")
   })
@@ -327,18 +412,13 @@ server <- function(input, output, session) {
       length(input$gapdh_group_cols) >= 1 &&
       !any(input$gapdh_group_cols == "")
     
-    if (cols_ok) shinyjs::enable("continue_to_tab3") else shinyjs::disable("continue_to_tab3")
+    ref_ok   <- !is.null(input$ref_gene) && nzchar(input$ref_gene)
+    treat_ok <- !is.null(input$treatment_col) && nzchar(input$treatment_col)
+    mock_ok  <- !is.null(input$mock_value) && nzchar(input$mock_value)
+    id_ok    <- !is.null(input$ddct_id_col) && nzchar(input$ddct_id_col)
+    
+    if (cols_ok && ref_ok && treat_ok && mock_ok && id_ok) shinyjs::enable("continue_to_tab3") else shinyjs::disable("continue_to_tab3")
   })
-  
-  # populate reference gene choices dynamically (DO NOT fire on init)
-  observeEvent(split_df_typed(), {
-    updateSelectInput(
-      session,
-      "ref_gene",
-      choices = sort(unique(as.character(split_df_typed()[["Target Name"]]))),
-      selected = NULL
-    )
-  }, ignoreInit = TRUE)
   
   # ------------------------------------------------------------
   # Freeze parsed data + proceed
@@ -356,7 +436,11 @@ server <- function(input, output, session) {
         input$multi_gapdh == "no" || length(input$gapdh_group_cols) > 1,
         "Multiple GAPDH requires more than one grouping column."
       ),
-      need(!is.null(input$ref_gene) && nzchar(input$ref_gene), "Select a reference gene.")
+      need(!is.null(input$ref_gene) && nzchar(input$ref_gene), "Select a reference gene."),
+      need(!is.null(input$treatment_col) && nzchar(input$treatment_col), "Select the treatment column."),
+      need(!is.null(input$mock_value) && nzchar(input$mock_value), "Select which value is Mock."),
+      need(!is.null(input$ddct_id_col) && nzchar(input$ddct_id_col), "Select the unique Sample ID column."),
+      need(input$ddct_id_col != input$treatment_col, "Unique Sample ID column cannot be the same as the treatment column.")
     )
     
     parsed_data(split_df_typed())
@@ -365,31 +449,50 @@ server <- function(input, output, session) {
   })
   
   # ------------------------------------------------------------
-  # Create ct_ref column (core normalization prep)
+  # Create ct_ref + ddCt columns
+  # - rounding happens DURING calculations at each step (r3)
   # ------------------------------------------------------------
   data_with_ct_ref <- eventReactive(input$continue_to_tab3, {
-    req(parsed_data(), input$ref_gene, input$gapdh_group_cols)
+    req(parsed_data(), input$ref_gene, input$gapdh_group_cols, input$treatment_col, input$mock_value, input$ddct_id_col)
     
     df <- parsed_data()
     
+    baseline_group_cols <- setdiff(parsed_part_cols(), c(input$treatment_col, input$ddct_id_col))
+    
+    # If you want rounding DURING ct_ref creation, do it here.
+    # This averages ref CT within the GAPDH grouping and rounds to 3 decimals.
     ref_df <- df %>%
       dplyr::filter(`Target Name` == input$ref_gene) %>%
-      dplyr::select(
-        dplyr::all_of(input$gapdh_group_cols),
-        ct_ref = CT
+      dplyr::group_by(dplyr::across(dplyr::all_of(input$gapdh_group_cols))) %>%
+      dplyr::summarise(ct_ref = r3(mean(CT, na.rm = TRUE)), .groups = "drop")
+    
+    out <- df %>%
+      dplyr::left_join(ref_df, by = input$gapdh_group_cols) %>%
+      dplyr::filter(`Target Name` != input$ref_gene) %>%
+      dplyr::mutate(
+        treatment_value = as.character(.data[[input$treatment_col]]),
+        is_mock = treatment_value == input$mock_value,
+        dCt = r3(CT - ct_ref)
       )
     
-    df %>%
-      dplyr::left_join(ref_df, by = input$gapdh_group_cols) %>%
-      dplyr::filter(`Target Name` != input$ref_gene)
+    mock_means <- out %>%
+      dplyr::filter(is_mock) %>%
+      dplyr::group_by(dplyr::across(dplyr::all_of(c(baseline_group_cols, "Target Name")))) %>%
+      dplyr::summarise(mock_mean_dCt = r3(mean(dCt, na.rm = TRUE)), .groups = "drop")
+    
+    out %>%
+      dplyr::left_join(mock_means, by = c(baseline_group_cols, "Target Name")) %>%
+      dplyr::mutate(
+        ddCt = r3(dCt - mock_mean_dCt),
+        fold_change_2negddCt = r3(2^(-ddCt))
+      )
   })
   
   # ------------------------------------------------------------
-  # TAB 3) Final Long table preview + save
+  # TAB 3) Preview + save
   # ------------------------------------------------------------
   output$ctref_preview <- renderDT({
     req(data_with_ct_ref())
-    
     DT::datatable(
       data_with_ct_ref(),
       rownames = FALSE,
@@ -397,11 +500,23 @@ server <- function(input, output, session) {
     )
   })
   
-  save_status_val <- reactiveVal("")
-  
-  output$save_status <- renderText({
-    save_status_val()
+  output$review_match_status <- renderPrint({
+    if (is.null(parsed_data())) {
+      cat("No parsed data locked yet.\n")
+    } else {
+      baseline_group_cols <- setdiff(parsed_part_cols(), c(input$treatment_col, input$ddct_id_col))
+      
+      cat("Reference gene:", input$ref_gene, "\n")
+      cat("GAPDH grouping column(s):", paste(input$gapdh_group_cols, collapse = ", "), "\n")
+      cat("Treatment column:", input$treatment_col, "\n")
+      cat("Mock value:", input$mock_value, "\n")
+      cat("Unique Sample ID column (excluded from baseline grouping):", input$ddct_id_col, "\n")
+      cat("Mock mean grouping columns:", paste(baseline_group_cols, collapse = ", "), "\n")
+    }
   })
+  
+  save_status_val <- reactiveVal("")
+  output$save_status <- renderText({ save_status_val() })
   
   observeEvent(input$save_csv, {
     req(data_with_ct_ref())
