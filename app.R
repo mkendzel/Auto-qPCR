@@ -292,7 +292,24 @@ server <- function(input, output, session) {
     req(split_df_typed())
     DT::datatable(split_df_typed(), rownames = FALSE, options = list(scrollX = TRUE))
   })
+
   
+  # ------------------------------------------------------------
+  # ddCt setup (treatment + mock + unique id to exclude)
+  # ------------------------------------------------------------
+  output$treatment_col_ui <- renderUI({
+    req(parsed_part_cols())
+    cols <- parsed_part_cols()
+    
+    selectInput(
+      "treatment_col",
+      "Which parsed column stores the treatment?",
+      choices  = c("— Select a column —" = "", stats::setNames(cols, cols)),
+      selected = "",
+      multiple = FALSE,
+      selectize = TRUE
+    )
+  })
   # ------------------------------------------------------------
   # GAPDH grouping
   # ------------------------------------------------------------
@@ -342,22 +359,7 @@ server <- function(input, output, session) {
     updateSelectInput(session, "ref_gene", selected = "")
   }, ignoreInit = TRUE)
   
-  # ------------------------------------------------------------
-  # ddCt setup (treatment + mock + unique id to exclude)
-  # ------------------------------------------------------------
-  output$treatment_col_ui <- renderUI({
-    req(parsed_part_cols())
-    cols <- parsed_part_cols()
-    
-    selectInput(
-      "treatment_col",
-      "Which parsed column stores the treatment?",
-      choices  = c("— Select a column —" = "", stats::setNames(cols, cols)),
-      selected = "",
-      multiple = FALSE,
-      selectize = TRUE
-    )
-  })
+
   
   output$mock_value_ui <- renderUI({
     req(split_df_typed())
