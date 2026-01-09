@@ -569,8 +569,6 @@ server <- function(input, output, session) {
   
   # ============================================================
   # TAB 4) Prism export logic
-  # - FIX 1: ">=3 detected" based on total parsed columns, not eligible grouping vars
-  # - FIX 2: Prism grouped-table style: rows = row_var, columns = group(s) with Y1..Yn replicate subcolumns
   # ============================================================
   
   prism_n_parsed <- reactive({
