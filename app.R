@@ -473,22 +473,24 @@ server <- function(input, output, session) {
       dplyr::left_join(ref_df, by = input$gapdh_group_cols) %>%
       dplyr::filter(`Target Name` != input$ref_gene) %>%
       dplyr::mutate(
-        treatment_value = as.character(.data[[input$treatment_col]]),
-        is_mock = treatment_value == input$mock_value,
-        dCt = r3(CT - ct_ref)
+        dCt = r3(CT - ct_ref),
+        .is_mock = as.character(.data[[input$treatment_col]]) == input$mock_value
       )
     
+    
     mock_means <- out %>%
-      dplyr::filter(is_mock) %>%
+      dplyr::filter(.is_mock) %>%
       dplyr::group_by(dplyr::across(dplyr::all_of(c(baseline_group_cols, "Target Name")))) %>%
       dplyr::summarise(mock_mean_dCt = r3(mean(dCt, na.rm = TRUE)), .groups = "drop")
+    
     
     out %>%
       dplyr::left_join(mock_means, by = c(baseline_group_cols, "Target Name")) %>%
       dplyr::mutate(
         ddCt = r3(dCt - mock_mean_dCt),
         fold_change_2negddCt = r3(2^(-ddCt))
-      )
+      ) %>%
+      dplyr::select(-.is_mock)
   })
   
   # ------------------------------------------------------------
