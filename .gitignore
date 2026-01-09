@@ -11,7 +11,7 @@ renv/python/
 # Ignore everything inside these directories
 data/raw/*
 data/output/long/*
-data/output/wide/*
+data/output/prism/*
 
 # keep the directories themselves
 !data/raw/
@@ -20,7 +20,7 @@ data/output/wide/*
 # And keep a README
 !data/raw/README.md
 !data/output/long/README.md
-!data/output/wide/README.md
+!data/output/prism/README.md
 
 # Logs
 shinylogs/
