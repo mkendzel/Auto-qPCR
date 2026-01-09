@@ -2,6 +2,7 @@ library(shiny)
 library(readxl)
 library(openxlsx)
 library(dplyr)
+library(tidyr)
 library(DT)
 library(janitor)
 library(shinyjs)
@@ -76,8 +77,8 @@ ui <- fluidPage(
           tags$hr(),
           
           uiOutput("part_labels_ui"),
-          tags$hr(),
           
+          tags$hr(),
           h4("Reference gene setup"),
           
           radioButtons(
@@ -149,6 +150,47 @@ ui <- fluidPage(
       
       tags$hr(),
       verbatimTextOutput("save_status")
+    ),
+    
+    # ============================================================
+    # TAB 4) Prism export setup
+    # ============================================================
+    tabPanel(
+      title = "4) Prism Export",
+      value = "prism",
+      
+      h4("Prism export setup"),
+      verbatimTextOutput("prism_detect_status"),
+      tags$hr(),
+      
+      uiOutput("prism_split_ui"),
+      uiOutput("prism_primary_ui"),
+      uiOutput("prism_secondary_ui"),
+      
+      tags$hr(),
+      uiOutput("prism_rowvar_ui"),
+      uiOutput("prism_valuevar_ui"),
+      uiOutput("prism_repid_ui"),
+      
+      tags$hr(),
+      h4("Prism-formatted preview"),
+      DTOutput("prism_preview"),
+      
+      tags$hr(),
+      h4("Save output (Prism format)"),
+      textInput(
+        "prism_title",
+        "Output table title (used for filename prefix)",
+        value = ""
+      ),
+      checkboxInput(
+        "prism_ok",
+        "I confirm this Prism export configuration is correct and should be saved.",
+        value = FALSE
+      ),
+      actionButton("save_prism", "Save Prism CSV(s)", class = "btn-primary"),
+      tags$hr(),
+      verbatimTextOutput("prism_save_status")
     )
   )
 )
@@ -166,6 +208,7 @@ server <- function(input, output, session) {
   observe({
     shinyjs::disable(selector = 'a[data-value="parse"]')
     shinyjs::disable(selector = 'a[data-value="review_match"]')
+    shinyjs::disable(selector = 'a[data-value="prism"]')
   })
   
   # ------------------------------------------------------------
@@ -216,24 +259,10 @@ server <- function(input, output, session) {
     
     tagList(
       lapply(seq_len(k), function(i) {
-        fluidRow(
-          column(
-            6,
-            textInput(
-              paste0("part_label_", i),
-              paste("Part", i, "label"),
-              value = paste0("part", i)
-            )
-          ),
-          column(
-            6,
-            selectInput(
-              paste0("part_type_", i),
-              paste("Part", i, "data type"),
-              choices = c("Categorical" = "categorical", "Continuous numeric" = "numeric"),
-              selected = "categorical"
-            )
-          )
+        textInput(
+          paste0("part_label_", i),
+          paste("Part", i, "label"),
+          value = paste0("part", i)
         )
       })
     )
@@ -245,17 +274,6 @@ server <- function(input, output, session) {
       lbl <- input[[paste0("part_label_", i)]]
       if (!is.null(lbl) && nzchar(lbl)) lbl else paste0("part", i)
     }, character(1))
-  })
-  
-  parsed_part_types <- reactive({
-    req(input$expected_parts, parsed_part_cols())
-    stats::setNames(
-      vapply(seq_len(input$expected_parts), function(i) {
-        t <- input[[paste0("part_type_", i)]]
-        if (!is.null(t) && nzchar(t)) t else "categorical"
-      }, character(1)),
-      parsed_part_cols()
-    )
   })
   
   split_df_live <- reactive({
@@ -270,21 +288,21 @@ server <- function(input, output, session) {
   })
   
   split_df_typed <- reactive({
-    req(split_df_live(), parsed_part_types())
+    req(split_df_live(), parsed_part_cols())
     
     df <- split_df_live()
     
-    for (col in names(parsed_part_types())) {
-      if (parsed_part_types()[[col]] == "numeric") {
-        df[[col]] <- as.numeric(df[[col]])
-      } else {
-        df[[col]] <- as.factor(df[[col]])
-      }
+    # All parsed parts -> factors (could change if need be later)
+    for (col in parsed_part_cols()) {
+      df[[col]] <- as.factor(df[[col]])
     }
     
-    # round CT on ingest (this is "rounding during calculations")
+    # CT numeric + rounding on ingest
     df$CT <- r3(as.numeric(df$CT))
+    
+    # Target Name factor
     df$`Target Name` <- as.factor(df$`Target Name`)
+    
     df
   })
   
@@ -292,10 +310,9 @@ server <- function(input, output, session) {
     req(split_df_typed())
     DT::datatable(split_df_typed(), rownames = FALSE, options = list(scrollX = TRUE))
   })
-
   
   # ------------------------------------------------------------
-  # ddCt setup (treatment + mock + unique id to exclude)
+  # ddCt setup (treatment + mock + unique id)
   # ------------------------------------------------------------
   output$treatment_col_ui <- renderUI({
     req(parsed_part_cols())
@@ -310,6 +327,7 @@ server <- function(input, output, session) {
       selectize = TRUE
     )
   })
+  
   # ------------------------------------------------------------
   # GAPDH grouping
   # ------------------------------------------------------------
@@ -339,7 +357,7 @@ server <- function(input, output, session) {
   })
   
   # ------------------------------------------------------------
-  # Reference gene selector (placeholder + forced selection)
+  # Reference gene selector
   # ------------------------------------------------------------
   output$ref_gene_ui <- renderUI({
     req(split_df_typed())
@@ -358,8 +376,6 @@ server <- function(input, output, session) {
   observeEvent(split_df_typed(), {
     updateSelectInput(session, "ref_gene", selected = "")
   }, ignoreInit = TRUE)
-  
-
   
   output$mock_value_ui <- renderUI({
     req(split_df_typed())
@@ -406,9 +422,7 @@ server <- function(input, output, session) {
   # ------------------------------------------------------------
   # Disable Tab 2 continue until prerequisites met
   # ------------------------------------------------------------
-  observe({
-    shinyjs::disable("continue_to_tab3")
-  })
+  observe({ shinyjs::disable("continue_to_tab3") })
   
   observe({
     cols_ok <- !is.null(input$gapdh_group_cols) &&
@@ -448,12 +462,12 @@ server <- function(input, output, session) {
     
     parsed_data(split_df_typed())
     shinyjs::enable(selector = 'a[data-value="review_match"]')
+    shinyjs::enable(selector = 'a[data-value="prism"]')
     updateTabsetPanel(session, "page", selected = "review_match")
   })
   
   # ------------------------------------------------------------
   # Create ct_ref + ddCt columns
-  # - rounding happens DURING calculations at each step (r3)
   # ------------------------------------------------------------
   data_with_ct_ref <- eventReactive(input$continue_to_tab3, {
     req(parsed_data(), input$ref_gene, input$gapdh_group_cols, input$treatment_col, input$mock_value, input$ddct_id_col)
@@ -462,8 +476,6 @@ server <- function(input, output, session) {
     
     baseline_group_cols <- setdiff(parsed_part_cols(), c(input$treatment_col, input$ddct_id_col))
     
-    # If you want rounding DURING ct_ref creation, do it here.
-    # This averages ref CT within the GAPDH grouping and rounds to 3 decimals.
     ref_df <- df %>%
       dplyr::filter(`Target Name` == input$ref_gene) %>%
       dplyr::group_by(dplyr::across(dplyr::all_of(input$gapdh_group_cols))) %>%
@@ -477,12 +489,10 @@ server <- function(input, output, session) {
         .is_mock = as.character(.data[[input$treatment_col]]) == input$mock_value
       )
     
-    
     mock_means <- out %>%
       dplyr::filter(.is_mock) %>%
       dplyr::group_by(dplyr::across(dplyr::all_of(c(baseline_group_cols, "Target Name")))) %>%
       dplyr::summarise(mock_mean_dCt = r3(mean(dCt, na.rm = TRUE)), .groups = "drop")
-    
     
     out %>%
       dplyr::left_join(mock_means, by = c(baseline_group_cols, "Target Name")) %>%
@@ -515,7 +525,7 @@ server <- function(input, output, session) {
       cat("GAPDH grouping column(s):", paste(input$gapdh_group_cols, collapse = ", "), "\n")
       cat("Treatment column:", input$treatment_col, "\n")
       cat("Mock value:", input$mock_value, "\n")
-      cat("Unique Sample ID column (excluded from baseline grouping):", input$ddct_id_col, "\n")
+      cat("Unique Sample ID column:", input$ddct_id_col, "\n")
       cat("Mock mean grouping columns:", paste(baseline_group_cols, collapse = ", "), "\n")
     }
   })
@@ -555,6 +565,274 @@ server <- function(input, output, session) {
     if (is.null(input$raw_files)) "Upload file(s) to begin."
     else if (!isTRUE(input$header_ok)) "Confirm the header row."
     else "Ready."
+  })
+  
+  # ============================================================
+  # TAB 4) Prism export logic
+  # - FIX 1: ">=3 detected" based on total parsed columns, not eligible grouping vars
+  # - FIX 2: Prism grouped-table style: rows = row_var, columns = group(s) with Y1..Yn replicate subcolumns
+  # ============================================================
+  
+  prism_n_parsed <- reactive({
+    req(parsed_part_cols())
+    length(parsed_part_cols())
+  })
+  
+  prism_group_candidates <- reactive({
+    req(parsed_part_cols(), input$ddct_id_col)
+    setdiff(parsed_part_cols(), input$ddct_id_col)
+  })
+  
+  output$prism_detect_status <- renderPrint({
+    req(parsed_part_cols(), prism_group_candidates(), prism_n_parsed())
+    all_parsed <- parsed_part_cols()
+    g <- prism_group_candidates()
+    n_parsed <- prism_n_parsed()
+    
+    if (n_parsed >= 3) {
+      cat(
+        "Detected at least 3 parsed columns:\n",
+        paste("-", all_parsed, collapse = "\n"),
+        "\n\nSeparate graphs suggested. Which variable do you want to split the graphs by?"
+      )
+    } else {
+      cat(
+        "Detected", n_parsed, "parsed column(s):\n",
+        paste("-", all_parsed, collapse = "\n")
+      )
+    }
+    
+    cat(
+      "\n\nEligible grouping/splitting columns (replicate ID excluded):\n",
+      paste("-", g, collapse = "\n")
+    )
+  })
+  
+  output$prism_split_ui <- renderUI({
+    req(prism_group_candidates(), prism_n_parsed())
+    g <- prism_group_candidates()
+    n_parsed <- prism_n_parsed()
+    
+    if (n_parsed >= 3) {
+      selectInput(
+        "prism_split_var",
+        "Which variable do you want to split the graphs by?",
+        choices = c("— Select a column —" = "", stats::setNames(g, g)),
+        selected = ""
+      )
+    } else {
+      NULL
+    }
+  })
+  
+  prism_remaining_candidates <- reactive({
+    req(prism_group_candidates(), prism_n_parsed())
+    g <- prism_group_candidates()
+    n_parsed <- prism_n_parsed()
+    
+    if (n_parsed >= 3) {
+      req(!is.null(input$prism_split_var))
+      if (!nzchar(input$prism_split_var)) return(character(0))
+      setdiff(g, input$prism_split_var)
+    } else {
+      g
+    }
+  })
+  
+  output$prism_primary_ui <- renderUI({
+    req(prism_remaining_candidates())
+    g <- prism_remaining_candidates()
+    
+    selectInput(
+      "prism_primary_group",
+      "Column grouping variable (Prism columns)",
+      choices = c("— Select a column —" = "", stats::setNames(g, g)),
+      selected = ""
+    )
+  })
+  
+  output$prism_secondary_ui <- renderUI({
+    req(prism_remaining_candidates(), input$prism_primary_group)
+    g <- prism_remaining_candidates()
+    g2 <- setdiff(g, input$prism_primary_group)
+    
+    if (!nzchar(input$prism_primary_group) || length(g2) == 0) return(NULL)
+    
+    selectInput(
+      "prism_secondary_group",
+      "Secondary column grouping variable (optional)",
+      choices = c("— None —" = "", stats::setNames(g2, g2)),
+      selected = ""
+    )
+  })
+  
+  output$prism_rowvar_ui <- renderUI({
+    req(data_with_ct_ref())
+    df <- data_with_ct_ref()
+    
+    choices <- names(df)
+    default <- if ("Target Name" %in% choices) "Target Name" else choices[1]
+    
+    selectInput(
+      "prism_row_var",
+      "What should each row represent? (typically Target Name)",
+      choices = stats::setNames(choices, choices),
+      selected = default
+    )
+  })
+  
+  output$prism_valuevar_ui <- renderUI({
+    req(data_with_ct_ref())
+    df <- data_with_ct_ref()
+    
+    numeric_candidates <- intersect(
+      c("CT", "ct_ref", "dCt", "ddCt", "fold_change_2negddCt"),
+      names(df)
+    )
+    
+    default <- if ("fold_change_2negddCt" %in% numeric_candidates) "fold_change_2negddCt" else numeric_candidates[1]
+    
+    selectInput(
+      "prism_value_var",
+      "Which value should Prism plot?",
+      choices = stats::setNames(numeric_candidates, numeric_candidates),
+      selected = default
+    )
+  })
+  
+  output$prism_repid_ui <- renderUI({
+    req(data_with_ct_ref(), input$ddct_id_col)
+    df <- data_with_ct_ref()
+    
+    choices <- names(df)
+    default <- if (input$ddct_id_col %in% choices) input$ddct_id_col else choices[1]
+    
+    selectInput(
+      "prism_replicate_id",
+      "Replicate ID column",
+      choices = stats::setNames(choices, choices),
+      selected = default
+    )
+  })
+  
+  prism_make_one_table <- function(df) {
+    req(input$prism_primary_group, input$prism_row_var, input$prism_value_var, input$prism_replicate_id)
+    req(nzchar(input$prism_primary_group))
+    
+    col_primary <- input$prism_primary_group
+    col_secondary <- if (!is.null(input$prism_secondary_group) && nzchar(input$prism_secondary_group)) input$prism_secondary_group else NULL
+    
+    row_var   <- input$prism_row_var
+    value_var <- input$prism_value_var
+    rep_id    <- input$prism_replicate_id
+    
+    # Column-group label
+    if (is.null(col_secondary)) {
+      df2 <- df %>% dplyr::mutate(.col_group = as.character(.data[[col_primary]]))
+    } else {
+      df2 <- df %>% dplyr::mutate(.col_group = paste(as.character(.data[[col_primary]]),
+                                                     as.character(.data[[col_secondary]]),
+                                                     sep = " | "))
+    }
+    
+    # One value per (row_var, col_group, replicate_id)
+    df3 <- df2 %>%
+      dplyr::select(dplyr::all_of(row_var), .col_group, dplyr::all_of(rep_id), .value = dplyr::all_of(value_var)) %>%
+      dplyr::group_by(dplyr::across(dplyr::all_of(c(row_var, ".col_group", rep_id)))) %>%
+      dplyr::summarise(.value = r3(mean(.value, na.rm = TRUE)), .groups = "drop")
+    
+    # Replicate index within each (row_var, col_group) -> Y1..Yn
+    df4 <- df3 %>%
+      dplyr::arrange(.data[[row_var]], .col_group, .data[[rep_id]]) %>%
+      dplyr::group_by(dplyr::across(dplyr::all_of(c(row_var, ".col_group")))) %>%
+      dplyr::mutate(.rep_n = dplyr::row_number()) %>%
+      dplyr::ungroup() %>%
+      dplyr::mutate(.colname = paste0(.col_group, ": Y", .rep_n))
+    
+    wide <- df4 %>%
+      dplyr::select(dplyr::all_of(row_var), .colname, .value) %>%
+      tidyr::pivot_wider(
+        id_cols = dplyr::all_of(row_var),
+        names_from = .colname,
+        values_from = .value
+      ) %>%
+      dplyr::arrange(.data[[row_var]])
+    
+    wide
+  }
+  
+  prism_tables <- reactive({
+    req(data_with_ct_ref(), prism_n_parsed(), prism_group_candidates())
+    df <- data_with_ct_ref()
+    n_parsed <- prism_n_parsed()
+    
+    if (n_parsed >= 3) {
+      req(!is.null(input$prism_split_var))
+      if (!nzchar(input$prism_split_var)) return(list())
+      
+      split_var <- input$prism_split_var
+      split_levels <- sort(unique(as.character(df[[split_var]])))
+      
+      out <- lapply(split_levels, function(lvl) {
+        df_sub <- df %>% dplyr::filter(as.character(.data[[split_var]]) == lvl)
+        prism_make_one_table(df_sub)
+      })
+      names(out) <- split_levels
+      out
+    } else {
+      list("ALL" = prism_make_one_table(df))
+    }
+  })
+  
+  output$prism_preview <- renderDT({
+    tabs <- prism_tables()
+    if (length(tabs) == 0) {
+      return(DT::datatable(data.frame(), rownames = FALSE, options = list(dom = "t")))
+    }
+    nm <- names(tabs)[1]
+    DT::datatable(
+      tabs[[nm]],
+      rownames = FALSE,
+      options = list(scrollX = TRUE, pageLength = 10, lengthMenu = c(10, 25, 50, 100))
+    )
+  })
+  
+  prism_save_status_val <- reactiveVal("")
+  output$prism_save_status <- renderText({ prism_save_status_val() })
+  
+  observeEvent(input$save_prism, {
+    tabs <- prism_tables()
+    req(length(tabs) >= 1)
+    req(isTRUE(input$prism_ok))
+    req(nzchar(input$prism_title))
+    
+    out_dir <- file.path("data", "output", "prism")
+    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+    
+    safe_prefix <- gsub("[^A-Za-z0-9_-]+", "_", input$prism_title)
+    
+    paths <- character(0)
+    for (nm in names(tabs)) {
+      tag <- if (nm == "ALL") "" else paste0("_", gsub("[^A-Za-z0-9_-]+", "_", nm))
+      out_path <- file.path(out_dir, paste0(safe_prefix, tag, "_prism.csv"))
+      write.csv(tabs[[nm]], out_path, row.names = FALSE)
+      paths <- c(paths, out_path)
+    }
+    
+    showNotification(
+      paste("Prism file(s) saved to:", out_dir),
+      type = "message",
+      duration = 6
+    )
+    
+    prism_save_status_val(
+      paste(
+        "Saved Prism export successfully.\n",
+        "Files:\n- ", paste(paths, collapse = "\n- "),
+        "\n\nTime: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+        sep = ""
+      )
+    )
   })
 }
 
