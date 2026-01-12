@@ -498,7 +498,7 @@ server <- function(input, output, session) {
       dplyr::left_join(mock_means, by = c(baseline_group_cols, "Target Name")) %>%
       dplyr::mutate(
         ddCt = r3(dCt - mock_mean_dCt),
-        fold_change_2negddCt = r3(2^(-ddCt))
+        relative_expression = r3(2^(-ddCt))
       ) %>%
       dplyr::select(-.is_mock)
   })
@@ -684,11 +684,11 @@ server <- function(input, output, session) {
     df <- data_with_ct_ref()
     
     numeric_candidates <- intersect(
-      c("CT", "ct_ref", "dCt", "ddCt", "fold_change_2negddCt"),
+      c("CT", "ct_ref", "dCt", "ddCt", "relative_expression"),
       names(df)
     )
     
-    default <- if ("fold_change_2negddCt" %in% numeric_candidates) "fold_change_2negddCt" else numeric_candidates[1]
+    default <- if ("relative_expression" %in% numeric_candidates) "relative_expression" else numeric_candidates[1]
     
     selectInput(
       "prism_value_var",
@@ -745,7 +745,11 @@ server <- function(input, output, session) {
       dplyr::group_by(dplyr::across(dplyr::all_of(c(row_var, ".col_group")))) %>%
       dplyr::mutate(.rep_n = dplyr::row_number()) %>%
       dplyr::ungroup() %>%
-      dplyr::mutate(.colname = paste0(.col_group, ": Y", .rep_n))
+      dplyr::mutate(
+        .rep_label = as.character(.data[[rep_id]]),
+        .colname   = paste0(.col_group, ": ", .rep_label)
+      ) %>%
+      dplyr::select(-.rep_label)
     
     wide <- df4 %>%
       dplyr::select(dplyr::all_of(row_var), .colname, .value) %>%
