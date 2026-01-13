@@ -727,7 +727,7 @@ server <- function(input, output, session) {
     out_dir <- file.path("data", "edit")
     dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
     
-    safe_name <- gsub("[^A-Za-z0-9_-]+", "_", input$qc_title)
+    safe_name <- paste0(gsub("[^A-Za-z0-9_-]+", "_", input$qc_title), "_edited")
     out_path <- file.path(out_dir, paste0(safe_name, ".xlsx"))
     
     wb <- openxlsx::createWorkbook()
@@ -797,8 +797,9 @@ server <- function(input, output, session) {
     out_dir <- file.path("data", "output", "long")
     dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
     
-    safe_name <- gsub("[^A-Za-z0-9_-]+", "_", input$out_title)
+    safe_name <- paste0(gsub("[^A-Za-z0-9_-]+", "_", input$out_title), "_long")
     out_path <- file.path(out_dir, paste0(safe_name, ".csv"))
+    
     
     write.csv(data_with_ct_ref(), out_path, row.names = FALSE)
     
@@ -1196,7 +1197,8 @@ server <- function(input, output, session) {
     
     safe_prefix <- paste0(
       gsub("[^A-Za-z0-9_-]+", "_", input$prism_title),
-      layout_suffix
+      layout_suffix,
+      "_prism"
     )
     
     paths <- character(0)
