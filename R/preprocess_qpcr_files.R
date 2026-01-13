@@ -1,14 +1,14 @@
 preprocess_qpcr_files <- function(files, combine_multiple = FALSE) {
-  # files: input$raw_files (data.frame with columns name, datapath, etc.)
-  # combine_multiple: TRUE/FALSE (logical)
-  
   dfs <- lapply(seq_len(nrow(files)), function(i) {
     path <- files$datapath[i]
     nm   <- files$name[i]
     
+    sh <- readxl::excel_sheets(path)
+    sheet_to_read <- if ("Results" %in% sh) "Results" else sh[1]
+    
     raw <- readxl::read_excel(
       path,
-      sheet = "Results",
+      sheet = sheet_to_read,
       col_names = FALSE
     )
     
