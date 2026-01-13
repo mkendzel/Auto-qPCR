@@ -12,15 +12,18 @@ renv/python/
 data/raw/*
 data/output/long/*
 data/output/prism/*
+data/edit/*
 
 # keep the directories themselves
 !data/raw/
 !data/output/
+!data/edit/
 
 # And keep a README
 !data/raw/README.md
 !data/output/long/README.md
 !data/output/prism/README.md
+!data/edit/README.md
 
 # Logs
 shinylogs/
