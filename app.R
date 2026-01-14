@@ -32,6 +32,16 @@ ui <- fluidPage(
       value = "import",
       sidebarLayout(
         sidebarPanel(
+          textInput(
+            "experiment_name",
+            "Experiment name (folder created in data/)",
+            value = ""
+          ),
+          helpText("Allowed: letters, numbers, underscore, hyphen. Other characters will be replaced with '_'."),
+
+          
+          tags$hr(),
+          
           radioButtons(
             "combine_files",
             "Do you have multiple qPCR files that should be combined?",
@@ -130,9 +140,10 @@ ui <- fluidPage(
       h4("Save for editing"),
       textInput(
         "qc_title",
-        "Edit file name (saved to data/edit/ as .xlsx)",
+        "Edit file name (saved to experiment qc/)",
         value = ""
       ),
+      helpText("Name for current QC pass (example: experimentname_qc_1)"),
       checkboxInput(
         "qc_save_ok",
         "I confirm I want to save a copy for editing (Tab 1 dataset + QC index).",
@@ -257,23 +268,40 @@ server <- function(input, output, session) {
   approved_data_original <- reactiveVal(NULL)
   parsed_data <- reactiveVal(NULL)
   
-  detected_parts <- reactive({
-    req(approved_data())
-    df <- approved_data()
-    req("Sample Name" %in% names(df))
-    x <- as.character(df[["Sample Name"]])
-    x <- trimws(x)
-    x <- x[nzchar(x)]
-    parts_n <- vapply(strsplit(x, "_", fixed = TRUE), length, integer(1))
-    tab <- table(parts_n)
-    top <- as.integer(names(tab)[tab == max(tab)])
-    if (length(top) == 0) return(4L)
-    max(top)
+  sanitize_experiment_name <- function(x) {
+    x <- trimws(as.character(x))
+    x <- gsub("[^A-Za-z0-9_-]+", "_", x)
+    x <- gsub("_+", "_", x)
+    x <- gsub("^[_-]+|[_-]+$", "", x)
+    if (!nzchar(x)) return("")
+    tolower(x)
+  }
+  
+  exp_name_safe <- reactive({
+    sanitize_experiment_name(input$experiment_name)
   })
   
-  observeEvent(approved_data(), {
-    updateNumericInput(session, "expected_parts", value = detected_parts())
-  }, ignoreInit = TRUE)
+  exp_dir <- reactive({
+    nm <- exp_name_safe()
+    if (!nzchar(nm)) return(NULL)
+    file.path("data", nm)
+  })
+  
+  ensure_experiment_dirs <- function(base_dir) {
+    dir.create(file.path(base_dir, "raw"), recursive = TRUE, showWarnings = FALSE)
+    dir.create(file.path(base_dir, "processed"), recursive = TRUE, showWarnings = FALSE)
+    dir.create(file.path(base_dir, "qc"), recursive = TRUE, showWarnings = FALSE)
+    dir.create(file.path(base_dir, "meta_data"), recursive = TRUE, showWarnings = FALSE)
+    dir.create(file.path(base_dir, "exports"), recursive = TRUE, showWarnings = FALSE)
+    invisible(TRUE)
+  }
+  
+  is_processed_round2_xlsx <- function(path) {
+    ext <- tolower(tools::file_ext(path))
+    if (ext != "xlsx") return(FALSE)
+    sheets <- openxlsx::getSheetNames(path)
+    "qc_index" %in% sheets
+  }
   
   observe({
     shinyjs::disable(selector = 'a[data-value="parse"]')
@@ -300,7 +328,6 @@ server <- function(input, output, session) {
     }
   })
   
-  
   qpcr <- reactive({
     req(input$raw_files)
     preprocess_qpcr_files(
@@ -315,11 +342,53 @@ server <- function(input, output, session) {
     DT::datatable(df, rownames = FALSE, options = list(scrollX = TRUE))
   })
   
+  detected_parts <- reactive({
+    req(approved_data())
+    df <- approved_data()
+    req("Sample Name" %in% names(df))
+    x <- as.character(df[["Sample Name"]])
+    x <- trimws(x)
+    x <- x[nzchar(x)]
+    parts_n <- vapply(strsplit(x, "_", fixed = TRUE), length, integer(1))
+    tab <- table(parts_n)
+    top <- as.integer(names(tab)[tab == max(tab)])
+    if (length(top) == 0) return(4L)
+    max(top)
+  })
+  
+  observeEvent(approved_data(), {
+    updateNumericInput(session, "expected_parts", value = detected_parts())
+  }, ignoreInit = TRUE)
+  
   observeEvent(input$continue_btn, {
     validate(
+      need(nzchar(exp_name_safe()), "Enter an experiment name."),
       need(!is.null(input$raw_files), "Upload file(s) first."),
       need(isTRUE(input$header_ok), "Confirm the header row.")
     )
+    
+    base_dir <- exp_dir()
+    ensure_experiment_dirs(base_dir)
+    
+    raw_dir <- file.path(base_dir, "raw")
+    processed_dir <- file.path(base_dir, "processed")
+    
+    for (i in seq_len(nrow(input$raw_files))) {
+      src <- input$raw_files$datapath[i]
+      dst_dir <- if (is_processed_round2_xlsx(src)) processed_dir else raw_dir
+      dst <- file.path(dst_dir, basename(input$raw_files$name[i]))
+      file.copy(src, dst, overwrite = TRUE)
+    }
+    
+    meta_dir <- file.path(base_dir, "meta_data")
+    meta <- data.frame(
+      saved_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+      experiment_name_input = input$experiment_name,
+      experiment_name_safe = exp_name_safe(),
+      file_names = paste(input$raw_files$name, collapse = "; "),
+      stringsAsFactors = FALSE
+    )
+    write.csv(meta, file.path(meta_dir, "import_meta.csv"), row.names = FALSE)
     
     approved_data_original(qpcr()$main)
     
@@ -545,7 +614,6 @@ server <- function(input, output, session) {
       dplyr::select(-.is_mock)
   })
   
-
   qc_results <- reactive({
     req(parsed_data(), data_with_ct_ref())
     req(input$ref_gene, input$treatment_col, input$mock_value, input$ddct_id_col)
@@ -570,9 +638,6 @@ server <- function(input, output, session) {
         .groups = "drop"
       )
     
-    # ------------------------------------------------------------
-    # QC1) Reference gene CT outside 18–22 (YELLOW if <4 away; RED if >=4 away)
-    # ------------------------------------------------------------
     qc1 <- df_all %>%
       dplyr::filter(as.character(.data[["Target Name"]]) == input$ref_gene) %>%
       dplyr::mutate(
@@ -606,9 +671,6 @@ server <- function(input, output, session) {
     df_long2 <- df_long %>%
       dplyr::mutate(.is_mock = as.character(.data[[trt_col]]) == input$mock_value)
     
-    # ------------------------------------------------------------
-    # QC2) Mock dCt SD (YELLOW 0.5–1.0, RED >1.0)
-    # ------------------------------------------------------------
     qc2 <- df_long2 %>%
       dplyr::filter(.is_mock) %>%
       dplyr::group_by(
@@ -646,9 +708,6 @@ server <- function(input, output, session) {
       ) %>%
       dplyr::distinct()
     
-    # ------------------------------------------------------------
-    # QC3) Mock relative_expression distance from 1
-    # ------------------------------------------------------------
     qc3 <- df_long2 %>%
       dplyr::filter(.is_mock) %>%
       dplyr::mutate(
@@ -695,10 +754,6 @@ server <- function(input, output, session) {
     list(qc_table = qc_table)
   })
   
-
-  
-  
-  # ---- Output the QC results
   output$qc_status <- renderPrint({
     req(qc_results())
     qt <- qc_results()$qc_table
@@ -723,29 +778,30 @@ server <- function(input, output, session) {
     req(qc_results(), approved_data_original())
     req(isTRUE(input$qc_save_ok))
     req(nzchar(input$qc_title))
+    req(exp_dir())
     
-    out_dir <- file.path("data", "edit")
-    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+    qc_dir <- file.path(exp_dir(), "qc")
+    dir.create(qc_dir, recursive = TRUE, showWarnings = FALSE)
     
-    safe_name <- paste0(gsub("[^A-Za-z0-9_-]+", "_", input$qc_title), "_edited")
-    out_path <- file.path(out_dir, paste0(safe_name, ".xlsx"))
+    base_name <- gsub("[^A-Za-z0-9_-]+", "_", input$qc_title)
+    out_path_xlsx <- file.path(qc_dir, paste0(base_name, "_edited.xlsx"))
     
     wb <- openxlsx::createWorkbook()
     openxlsx::addWorksheet(wb, "Results")
     openxlsx::writeData(wb, "Results", approved_data_original())
     openxlsx::addWorksheet(wb, "qc_index")
     openxlsx::writeData(wb, "qc_index", qc_results()$qc_table)
-    openxlsx::saveWorkbook(wb, out_path, overwrite = TRUE)
+    openxlsx::saveWorkbook(wb, out_path_xlsx, overwrite = TRUE)
     
     showNotification(
-      paste("Edit XLSX saved:", out_path),
+      paste("QC XLSX saved:", out_path_xlsx),
       type = "message",
       duration = 6
     )
     
     qc_save_status_val(
       paste(
-        "Saved successfully:\n- ", out_path, "\n",
+        "Saved successfully:\n- ", out_path_xlsx, "\n",
         "Time: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
         sep = ""
       )
@@ -783,6 +839,7 @@ server <- function(input, output, session) {
       cat("Mock value:", input$mock_value, "\n")
       cat("Unique Sample ID column:", input$ddct_id_col, "\n")
       cat("Mock mean grouping columns:", paste(baseline_group_cols, collapse = ", "), "\n")
+      cat("Experiment folder:", exp_dir(), "\n")
     }
   })
   
@@ -793,13 +850,13 @@ server <- function(input, output, session) {
     req(data_with_ct_ref())
     req(isTRUE(input$save_ok))
     req(nzchar(input$out_title))
+    req(exp_dir())
     
-    out_dir <- file.path("data", "output", "long")
+    out_dir <- file.path(exp_dir(), "exports")
     dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
     
     safe_name <- paste0(gsub("[^A-Za-z0-9_-]+", "_", input$out_title), "_long")
     out_path <- file.path(out_dir, paste0(safe_name, ".csv"))
-    
     
     write.csv(data_with_ct_ref(), out_path, row.names = FALSE)
     
@@ -819,9 +876,10 @@ server <- function(input, output, session) {
   })
   
   output$status_msg <- renderPrint({
-    if (is.null(input$raw_files)) "Upload file(s) to begin."
+    if (!nzchar(exp_name_safe())) "Enter an experiment name."
+    else if (is.null(input$raw_files)) "Upload file(s) to begin."
     else if (!isTRUE(input$header_ok)) "Confirm the header row."
-    else "Ready."
+    else paste0("Ready. Experiment folder: ", exp_dir())
   })
   
   prism_n_parsed <- reactive({
@@ -1183,8 +1241,9 @@ server <- function(input, output, session) {
     req(length(tabs) >= 1)
     req(isTRUE(input$prism_ok))
     req(nzchar(input$prism_title))
+    req(exp_dir())
     
-    out_dir <- file.path("data", "output", "prism")
+    out_dir <- file.path(exp_dir(), "exports")
     dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
     
     layout_suffix <- if (input$prism_table_type == "grouped") {
@@ -1195,19 +1254,17 @@ server <- function(input, output, session) {
       "_column_compact"
     }
     
-    safe_prefix <- paste0(
-      gsub("[^A-Za-z0-9_-]+", "_", input$prism_title),
-      layout_suffix,
-      "_prism"
-    )
+    safe_title <- gsub("[^A-Za-z0-9_-]+", "_", input$prism_title)
+    safe_base  <- paste0(safe_title, layout_suffix)
     
     paths <- character(0)
     
     for (nm in names(tabs)) {
-      tag <- ""
+      split_tag <- ""
+      target_tag <- ""
       
       if (input$prism_table_type == "grouped") {
-        tag <- if (nm == "ALL") "" else paste0("_", gsub("[^A-Za-z0-9_-]+", "_", nm))
+        split_tag <- if (nm == "ALL") "" else paste0("_", gsub("[^A-Za-z0-9_-]+", "_", nm))
       } else {
         parts <- strsplit(nm, "__TARGET__", fixed = TRUE)[[1]]
         split_label <- parts[1]
@@ -1215,10 +1272,9 @@ server <- function(input, output, session) {
         
         split_tag  <- if (split_label == "ALL") "" else paste0("_", gsub("[^A-Za-z0-9_-]+", "_", split_label))
         target_tag <- paste0("_", gsub("[^A-Za-z0-9_-]+", "_", target_name))
-        tag <- paste0(split_tag, target_tag)
       }
       
-      out_path <- file.path(out_dir, paste0(safe_prefix, tag, ".csv"))
+      out_path <- file.path(out_dir, paste0(safe_base, split_tag, "_prism", target_tag, ".csv"))
       write.csv(tabs[[nm]], out_path, row.names = FALSE)
       paths <- c(paths, out_path)
     }
