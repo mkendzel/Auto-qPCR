@@ -11,14 +11,15 @@ library(openxlsx)
 library(dplyr)
 library(tidyr)
 library(DT)
+library(janitor)
 library(shinyjs)
 
-# Source helper functions from R/ (file parsing, directory creation, logging helpers, etc.)
+# Source helper functions from R/
 invisible(lapply(list.files("R", "\\.R$", full.names = TRUE), source, local = FALSE))
 
-# Keep validate/need in short names for input gating messages
+# Keep validate/need using shiny namespace
 validate <- shiny::validate
-need <- shiny::need
+need <- shiny::need 
 
 ## =========================
 ## UI
@@ -57,7 +58,7 @@ ui <- fluidPage(
             selected = FALSE
           ),
           
-          # File input UI (switches between single vs multiple fileInput)
+          # File input UI (switches between single vs multiple file Input)
           uiOutput("file_upload_ui"),
           
           tags$hr(),
@@ -181,6 +182,33 @@ ui <- fluidPage(
       
       tags$hr(),
       
+      h4("Save QC outputs"),
+      
+      # Title used to write QC outputs into experiment meta_data/
+      textInput(
+        "qc_title",
+        "QC output file name (saved to experiment meta_data/)",
+        value = ""
+      ),
+      helpText("Name for current QC pass (example: experimentname_qc_1)"),
+      
+      # Confirmation gate for writing QC outputs
+      checkboxInput(
+        "qc_save_ok",
+        "I confirm I want to save the full QC outputs.",
+        value = FALSE
+      ),
+      
+      # Writes <qc_title>_qc_calcs_full.xlsx and <qc_title>_qc_flags.xlsx to meta_data/
+      actionButton("save_qc_outputs", "Save QC outputs", class = "btn-primary"),
+      
+      tags$hr(),
+      
+      # Save status text for QC outputs
+      verbatimTextOutput("qc_save_status"),
+      
+      tags$hr(),
+      
       h4("QC failures"),
       
       # Table of all QC flags (one row per sample/target/flag)
@@ -188,30 +216,15 @@ ui <- fluidPage(
       
       tags$hr(),
       
-      h4("Save for editing"),
+      h4("Optional: remove samples by ID"),
       
-      # Title used to write QC edit workbook into experiment qc/
-      textInput(
-        "qc_title",
-        "Edit file name (saved to experiment qc/)",
-        value = ""
+      # Removal status and controls (enabled only after QC outputs have been saved once)
+      verbatimTextOutput("qc_removed_status"),
+      uiOutput("qc_remove_ids_ui"),
+      fluidRow(
+        column(6, actionButton("qc_remove_apply", "Remove selected sample(s)", class = "btn-warning")),
+        column(6, actionButton("qc_remove_reset", "Reset removals", class = "btn-default"))
       ),
-      helpText("Name for current QC pass (example: experimentname_qc_1)"),
-      
-      # Confirmation gate for writing the XLSX with Results + qc_index sheets
-      checkboxInput(
-        "qc_save_ok",
-        "I confirm I want to save a copy for editing (Tab 1 dataset + QC index).",
-        value = FALSE
-      ),
-      
-      # Writes <qc_title>_edited.xlsx to qc/
-      actionButton("save_qc_edit", "Save edit XLSX", class = "btn-primary"),
-      
-      tags$hr(),
-      
-      # Save status text for QC edit workbook
-      verbatimTextOutput("qc_save_status"),
       
       tags$hr(),
       
@@ -387,13 +400,19 @@ server <- function(input, output, session) {
   # Rounding helper used throughout exported metrics
   r3 <- function(x) round(x, 3)
   
-  # Data state across tabs:
-  # - approved_data_original: raw imported main dataset (before .import_row)
-  # - approved_data: main dataset with .import_row tracking
-  # - parsed_data: parsed + typed dataset locked at end of Tab 2
+  # Data state across tabs
   approved_data <- reactiveVal(NULL)
   approved_data_original <- reactiveVal(NULL)
   parsed_data <- reactiveVal(NULL)
+  
+  # Working dataset used for QC + downstream
+  parsed_data_working <- reactiveVal(NULL)
+  
+  # Track sample IDs removed in Tab 3
+  qc_removed_ids <- reactiveVal(character(0))
+  
+  # Gate removals/continue until QC outputs have been saved once
+  qc_saved_once <- reactiveVal(FALSE)
   
   # Sanitized experiment name used for folder paths
   exp_name_safe <- reactive({
@@ -496,7 +515,6 @@ server <- function(input, output, session) {
       need(isTRUE(input$header_ok), "Confirm the header row.")
     )
     
-    # Log button click + context
     if (!is.null(logger())) {
       logger()$append_event(
         tab = input$page,
@@ -509,11 +527,9 @@ server <- function(input, output, session) {
       )
     }
     
-    # Ensure experiment directory structure exists
     base_dir <- exp_dir()
     ensure_experiment_dirs(base_dir)
     
-    # Copy uploads into raw/ vs processed/ depending on whether they look like round-2 edited files
     raw_dir <- file.path(base_dir, "raw")
     processed_dir <- file.path(base_dir, "processed")
     
@@ -524,7 +540,6 @@ server <- function(input, output, session) {
       file.copy(src, dst, overwrite = TRUE)
     }
     
-    # Log file copy operation
     if (!is.null(logger())) {
       logger()$append_event(
         tab = input$page,
@@ -536,7 +551,6 @@ server <- function(input, output, session) {
       )
     }
     
-    # Write a simple import metadata record
     meta_dir <- file.path(base_dir, "meta_data")
     meta <- data.frame(
       saved_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
@@ -547,15 +561,12 @@ server <- function(input, output, session) {
     )
     write.csv(meta, file.path(meta_dir, "import_meta.csv"), row.names = FALSE)
     
-    # Store baseline main dataset (used later when saving QC edit workbook)
     approved_data_original(qpcr()$main)
     
-    # Store working dataset with an import row index for traceability
     df0 <- qpcr()$main
     df0 <- df0 %>% dplyr::mutate(.import_row = dplyr::row_number())
     approved_data(df0)
     
-    # Unlock Tab 2 and navigate forward
     shinyjs::enable(selector = 'a[data-value="parse"]')
     updateTabsetPanel(session, "page", selected = "parse")
   })
@@ -575,7 +586,7 @@ server <- function(input, output, session) {
     )
   })
   
-  # Vector of parsed part column names, using UI labels (fallback to part1/part2/...)
+  # Vector of parsed part column names, using UI labels
   parsed_part_cols <- reactive({
     req(input$expected_parts)
     vapply(seq_len(input$expected_parts), function(i) {
@@ -584,7 +595,7 @@ server <- function(input, output, session) {
     }, character(1))
   })
   
-  # Live split of Sample Name into parsed columns (no type conversions)
+  # Live split of Sample Name into parsed columns
   split_df_live <- reactive({
     req(approved_data(), parsed_part_cols(), input$expected_parts)
     split_sample_name(
@@ -595,7 +606,7 @@ server <- function(input, output, session) {
     )
   })
   
-  # Apply typing to parsed columns and key fields for cleaner downstream behavior
+  # Apply typing to parsed columns and key fields
   split_df_typed <- reactive({
     req(split_df_live(), parsed_part_cols())
     df <- split_df_live()
@@ -625,7 +636,7 @@ server <- function(input, output, session) {
     )
   })
   
-  # GAPDH grouping column selector changes depending on whether multiple GAPDH per individual is expected
+  # GAPDH grouping column selector
   output$gapdh_group_cols_ui <- renderUI({
     req(parsed_part_cols())
     cols <- parsed_part_cols()
@@ -650,7 +661,7 @@ server <- function(input, output, session) {
     }
   })
   
-  # Reference gene selection (ct_ref baseline)
+  # Reference gene selection
   output$ref_gene_ui <- renderUI({
     req(split_df_typed())
     genes <- sort(unique(as.character(split_df_typed()[["Target Name"]])))
@@ -664,7 +675,6 @@ server <- function(input, output, session) {
     )
   })
   
-  # Clear ref_gene selection when upstream data changes
   observeEvent(split_df_typed(), {
     updateSelectInput(session, "ref_gene", selected = "")
   }, ignoreInit = TRUE)
@@ -699,22 +709,18 @@ server <- function(input, output, session) {
     )
   })
   
-  # Reset mock selection when treatment column changes
   observeEvent(input$treatment_col, {
     updateSelectInput(session, "mock_value", selected = "")
   }, ignoreInit = TRUE)
   
-  # Reset key Tab 2 selectors if the parsed dataset changes
   observeEvent(split_df_typed(), {
     updateSelectInput(session, "treatment_col", selected = "")
     updateSelectInput(session, "mock_value", selected = "")
     updateSelectInput(session, "ddct_id_col", selected = "")
   }, ignoreInit = TRUE)
   
-  # Default: disable Tab 2 Continue until required fields are chosen
   observe({ shinyjs::disable("continue_to_tab3") })
   
-  # Enable Tab 2 Continue only when all required selections are present
   observe({
     cols_ok <- !is.null(input$gapdh_group_cols) &&
       length(input$gapdh_group_cols) >= 1 &&
@@ -753,7 +759,6 @@ server <- function(input, output, session) {
       need(input$ddct_id_col != input$treatment_col, "Unique Sample ID column cannot be the same as the treatment column.")
     )
     
-    # Log parse configuration used for downstream calculations
     if (!is.null(logger())) {
       logger()$append_event(
         tab = input$page,
@@ -771,27 +776,30 @@ server <- function(input, output, session) {
       )
     }
     
-    # Lock parsed dataset used for QC + exports
     parsed_data(split_df_typed())
+    parsed_data_working(split_df_typed())
+    qc_removed_ids(character(0))
+    qc_saved_once(FALSE)
     
-    # Unlock Tab 3 and navigate forward
     shinyjs::enable(selector = 'a[data-value="qc"]')
     updateTabsetPanel(session, "page", selected = "qc")
+    
+    shinyjs::disable("qc_remove_apply")
+    shinyjs::disable("qc_remove_reset")
+    shinyjs::disable("continue_to_review")
   })
   
-  # Compute ct_ref, dCt, mock mean dCt, ddCt, and relative expression after Tab 2 is confirmed
-  data_with_ct_ref <- eventReactive(input$continue_to_tab3, {
-    req(parsed_data(), input$ref_gene, input$gapdh_group_cols, input$treatment_col, input$mock_value, input$ddct_id_col)
-    df <- parsed_data()
+  # Compute ct_ref, dCt, mock mean dCt, ddCt, and relative expression
+  data_with_ct_ref <- reactive({
+    req(parsed_data_working(), input$ref_gene, input$gapdh_group_cols, input$treatment_col, input$mock_value, input$ddct_id_col)
+    df <- parsed_data_working()
     baseline_group_cols <- setdiff(parsed_part_cols(), c(input$treatment_col, input$ddct_id_col))
     
-    # Reference gene ct_ref computed per selected GAPDH grouping
     ref_df <- df %>%
       dplyr::filter(`Target Name` == input$ref_gene) %>%
       dplyr::group_by(dplyr::across(dplyr::all_of(input$gapdh_group_cols))) %>%
       dplyr::summarise(ct_ref = r3(mean(CT, na.rm = TRUE)), .groups = "drop")
     
-    # Join ct_ref back; drop ref gene rows; compute dCt
     out <- df %>%
       dplyr::left_join(ref_df, by = input$gapdh_group_cols) %>%
       dplyr::filter(`Target Name` != input$ref_gene) %>%
@@ -800,13 +808,11 @@ server <- function(input, output, session) {
         .is_mock = as.character(.data[[input$treatment_col]]) == input$mock_value
       )
     
-    # Mock mean dCt computed per baseline group columns + Target Name
     mock_means <- out %>%
       dplyr::filter(.is_mock) %>%
       dplyr::group_by(dplyr::across(dplyr::all_of(c(baseline_group_cols, "Target Name")))) %>%
       dplyr::summarise(mock_mean_dCt = r3(mean(dCt, na.rm = TRUE)), .groups = "drop")
     
-    # ddCt + relative expression (2^-ddCt)
     out %>%
       dplyr::left_join(mock_means, by = c(baseline_group_cols, "Target Name")) %>%
       dplyr::mutate(
@@ -816,12 +822,12 @@ server <- function(input, output, session) {
       dplyr::select(-.is_mock)
   })
   
-  # Build QC flags table (ref CT range, mock dCt SD, mock rel expr deviation)
+  # Build QC flags table and full calculation table
   qc_results <- reactive({
-    req(parsed_data(), data_with_ct_ref())
+    req(parsed_data_working(), data_with_ct_ref())
     req(input$ref_gene, input$treatment_col, input$mock_value, input$ddct_id_col)
     
-    df_all    <- parsed_data()
+    df_all    <- parsed_data_working()
     df_long   <- data_with_ct_ref()
     id_col    <- input$ddct_id_col
     trt_col   <- input$treatment_col
@@ -838,7 +844,6 @@ server <- function(input, output, session) {
       r3 = r3
     )
   })
-  
   
   # Tab 3: QC summary counts
   qc_metric_labels <- c(
@@ -867,101 +872,178 @@ server <- function(input, output, session) {
     )
   })
   
-  # QC edit save status text buffer
+  # QC save status text buffer
   qc_save_status_val <- reactiveVal("")
   output$qc_save_status <- renderText({ qc_save_status_val() })
   
-  # Save QC edit workbook: Results sheet (Tab 1 dataset) + qc_index sheet (QC flags)
-  observeEvent(input$save_qc_edit, {
-    req(qc_results(), approved_data_original())
+  # Save QC outputs to meta_data/
+  observeEvent(input$save_qc_outputs, {
+    req(qc_results())
     req(isTRUE(input$qc_save_ok))
     req(nzchar(input$qc_title))
     req(exp_dir())
     
-    # Log the save intent + summary QC counts
+    base_name <- gsub("[^A-Za-z0-9_-]+", "_", input$qc_title)
+    
+    meta_dir <- file.path(exp_dir(), "meta_data")
+    dir.create(meta_dir, recursive = TRUE, showWarnings = FALSE)
+    
+    qc_calcs_path <- file.path(meta_dir, paste0(base_name, "_qc_calcs_full.xlsx"))
+    qc_flags_path <- file.path(meta_dir, paste0(base_name, "_qc_flags.xlsx"))
+    
+    wb1 <- openxlsx::createWorkbook()
+    openxlsx::addWorksheet(wb1, "qc_calcs_full")
+    openxlsx::writeData(wb1, "qc_calcs_full", qc_results()$qc_calc_table)
+    openxlsx::saveWorkbook(wb1, qc_calcs_path, overwrite = TRUE)
+    
+    wb2 <- openxlsx::createWorkbook()
+    openxlsx::addWorksheet(wb2, "qc_flags")
+    openxlsx::writeData(wb2, "qc_flags", qc_results()$qc_table)
+    openxlsx::saveWorkbook(wb2, qc_flags_path, overwrite = TRUE)
+    
     if (!is.null(logger())) {
       logger()$append_event(
         tab = input$page,
-        action = "save_qc_edit_clicked",
+        action = "save_qc_outputs_clicked",
         details = list(
           qc_title = input$qc_title,
           qc_save_ok = isTRUE(input$qc_save_ok),
           qc_flags_n = nrow(qc_results()$qc_table),
           qc_red_n = sum(qc_results()$qc_table$severity == "RED", na.rm = TRUE),
-          qc_yellow_n = sum(qc_results()$qc_table$severity == "YELLOW", na.rm = TRUE)
+          qc_yellow_n = sum(qc_results()$qc_table$severity == "YELLOW", na.rm = TRUE),
+          removed_ids_n = length(qc_removed_ids()),
+          qc_calcs_path = qc_calcs_path,
+          qc_flags_path = qc_flags_path
         )
       )
     }
     
-    # Ensure qc/ exists
-    qc_dir <- file.path(exp_dir(), "qc")
-    dir.create(qc_dir, recursive = TRUE, showWarnings = FALSE)
-    
-    # Write <title>_edited.xlsx into qc/
-    base_name <- gsub("[^A-Za-z0-9_-]+", "_", input$qc_title)
-    out_path_xlsx <- file.path(qc_dir, paste0(base_name, "_edited.xlsx"))
-    
-    wb <- openxlsx::createWorkbook()
-    openxlsx::addWorksheet(wb, "Results")
-    openxlsx::writeData(wb, "Results", approved_data_original())
-    openxlsx::addWorksheet(wb, "qc_index")
-    openxlsx::writeData(wb, "qc_index", qc_results()$qc_table)
-    openxlsx::saveWorkbook(wb, out_path_xlsx, overwrite = TRUE)
-    
-    # Write QC calcs full table into meta_data/
-    meta_dir <- file.path(exp_dir(), "meta_data")
-    dir.create(meta_dir, recursive = TRUE, showWarnings = FALSE)
-    
-    qc_calcs_path <- file.path(meta_dir, paste0(base_name, "_qc_calcs_full.xlsx"))
-    
-    wb2 <- openxlsx::createWorkbook()
-    openxlsx::addWorksheet(wb2, "qc_calcs_full")
-    openxlsx::writeData(wb2, "qc_calcs_full", qc_results()$qc_calc_table)
-    openxlsx::saveWorkbook(wb2, qc_calcs_path, overwrite = TRUE)
-    
-    # Log the output path
-    if (!is.null(logger())) {
-      logger()$append_event(
-        tab = input$page,
-        action = "qc_edit_xlsx_saved",
-        details = list(out_path_xlsx = out_path_xlsx)
-      )
-      
-      logger()$append_event(
-        tab = input$page,
-        action = "qc_calcs_full_saved",
-        details = list(qc_calcs_path = qc_calcs_path)
-      )
-    }
+    qc_saved_once(TRUE)
+    shinyjs::enable("qc_remove_apply")
+    shinyjs::enable("qc_remove_reset")
+    shinyjs::enable("continue_to_review")
     
     showNotification(
-      paste("QC XLSX saved:", out_path_xlsx),
+      paste("QC outputs saved:", base_name),
       type = "message",
       duration = 6
     )
     
     qc_save_status_val(
       paste(
-        "Saved successfully:\n- ", out_path_xlsx, "\n",
+        "Saved successfully:\n- ", qc_calcs_path, "\n- ", qc_flags_path, "\n",
         "Time: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
         sep = ""
       )
     )
   })
-
   
-  # Tab 3 Continue: block if QC flags exist unless override is checked; then unlock Tabs 4/5
+  # Tab 3: removal UI for sample IDs
+  output$qc_remove_ids_ui <- renderUI({
+    req(parsed_data_working(), input$ddct_id_col)
+    df <- parsed_data_working()
+    id_col <- input$ddct_id_col
+    ids <- sort(unique(as.character(df[[id_col]])))
+    
+    selectizeInput(
+      "qc_remove_ids",
+      "Select Sample ID(s) to remove (optional)",
+      choices = ids,
+      selected = character(0),
+      multiple = TRUE,
+      options = list(placeholder = "Start typing a Sample ID...")
+    )
+  })
+  
+  # Tab 3: removal status text
+  output$qc_removed_status <- renderPrint({
+    req(parsed_data())
+    df0 <- parsed_data()
+    id_col <- input$ddct_id_col
+    n0 <- length(unique(as.character(df0[[id_col]])))
+    
+    dfw <- parsed_data_working()
+    nw <- if (is.null(dfw)) 0 else length(unique(as.character(dfw[[id_col]])))
+    
+    removed <- qc_removed_ids()
+    cat("Original unique Sample IDs:", n0, "\n")
+    cat("Current unique Sample IDs:", nw, "\n")
+    cat("Removed Sample IDs:", length(removed), "\n")
+    if (length(removed) > 0) {
+      cat(paste0("- ", removed, collapse = "\n"), "\n")
+    }
+  })
+  
+  # Tab 3: apply removals (updates working dataset)
+  observeEvent(input$qc_remove_apply, {
+    req(isTRUE(qc_saved_once()))
+    req(parsed_data_working(), parsed_data())
+    req(input$ddct_id_col)
+    req(!is.null(input$qc_remove_ids))
+    
+    ids_rm <- as.character(input$qc_remove_ids)
+    if (length(ids_rm) == 0) return(invisible(NULL))
+    
+    id_col <- input$ddct_id_col
+    
+    dfw <- parsed_data_working()
+    dfw2 <- dfw %>% dplyr::filter(!as.character(.data[[id_col]]) %in% ids_rm)
+    parsed_data_working(dfw2)
+    
+    removed_now <- sort(unique(c(qc_removed_ids(), ids_rm)))
+    qc_removed_ids(removed_now)
+    
+    if (!is.null(logger())) {
+      logger()$append_event(
+        tab = input$page,
+        action = "qc_remove_samples_applied",
+        details = list(
+          ddct_id_col = id_col,
+          removed_ids = ids_rm,
+          removed_total_n = length(removed_now),
+          remaining_unique_ids_n = length(unique(as.character(dfw2[[id_col]])))
+        )
+      )
+    }
+    
+    updateSelectizeInput(session, "qc_remove_ids", selected = character(0), choices = sort(unique(as.character(dfw2[[id_col]]))))
+  }, ignoreInit = TRUE)
+  
+  # Tab 3: reset removals (restores working dataset to locked parsed_data)
+  observeEvent(input$qc_remove_reset, {
+    req(isTRUE(qc_saved_once()))
+    req(parsed_data())
+    parsed_data_working(parsed_data())
+    qc_removed_ids(character(0))
+    
+    if (!is.null(logger())) {
+      logger()$append_event(
+        tab = input$page,
+        action = "qc_remove_samples_reset",
+        details = list(
+          ddct_id_col = input$ddct_id_col
+        )
+      )
+    }
+    
+    df0 <- parsed_data()
+    id_col <- input$ddct_id_col
+    updateSelectizeInput(session, "qc_remove_ids", selected = character(0), choices = sort(unique(as.character(df0[[id_col]]))))
+  }, ignoreInit = TRUE)
+  
+  # Tab 3 Continue: block if QC flags exist unless override is checked; unlock Tabs 4/5
   observeEvent(input$continue_to_review, {
+    req(isTRUE(qc_saved_once()))
     req(qc_results())
     
-    # Log attempt to proceed and whether override was used
     if (!is.null(logger())) {
       logger()$append_event(
         tab = input$page,
         action = "continue_to_review_clicked",
         details = list(
           qc_override_ok = isTRUE(input$qc_override_ok),
-          qc_flags_n = nrow(qc_results()$qc_table)
+          qc_flags_n = nrow(qc_results()$qc_table),
+          removed_ids_n = length(qc_removed_ids())
         )
       )
     }
@@ -988,7 +1070,7 @@ server <- function(input, output, session) {
   
   # Tab 4: print a configuration summary showing the locked inputs
   output$review_match_status <- renderPrint({
-    if (is.null(parsed_data())) {
+    if (is.null(parsed_data_working())) {
       cat("No parsed data locked yet.\n")
     } else {
       baseline_group_cols <- setdiff(parsed_part_cols(), c(input$treatment_col, input$ddct_id_col))
@@ -999,6 +1081,7 @@ server <- function(input, output, session) {
       cat("Unique Sample ID column:", input$ddct_id_col, "\n")
       cat("Mock mean grouping columns:", paste(baseline_group_cols, collapse = ", "), "\n")
       cat("Experiment folder:", exp_dir(), "\n")
+      cat("Removed Sample IDs:", length(qc_removed_ids()), "\n")
     }
   })
   
@@ -1013,7 +1096,6 @@ server <- function(input, output, session) {
     req(nzchar(input$out_title))
     req(exp_dir())
     
-    # Log save action and row count
     if (!is.null(logger())) {
       logger()$append_event(
         tab = input$page,
@@ -1021,12 +1103,12 @@ server <- function(input, output, session) {
         details = list(
           out_title = input$out_title,
           save_ok = isTRUE(input$save_ok),
-          rows = nrow(data_with_ct_ref())
+          rows = nrow(data_with_ct_ref()),
+          removed_ids_n = length(qc_removed_ids())
         )
       )
     }
     
-    # Write to exports/
     out_dir <- file.path(exp_dir(), "exports")
     dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
     
@@ -1035,12 +1117,10 @@ server <- function(input, output, session) {
     
     write.csv(data_with_ct_ref(), out_path, row.names = FALSE)
     
-    # Snapshot run context (inputs + QC + output paths + session package versions)
     if (!is.null(logger())) {
       in_list <- shiny::reactiveValuesToList(input)
       in_list$raw_files <- NULL
       
-      # Drop DT (DataTables) widget state inputs to avoid massive repeated JSON
       dt_prefixes <- c(
         "data_preview", "sample_parse_preview", "qc_fail_preview",
         "ctref_preview", "prism_preview"
@@ -1142,7 +1222,7 @@ server <- function(input, output, session) {
       cat(
         "Detected at least 3 parsed columns:\n",
         paste("-", all_parsed, collapse = "\n"),
-        "\n\nSeparate graphs suggested. Which variable do you want to split the graphs by?"
+        "\n\nSeparate graphs suggested. Which variable do you want a seperate graph for?"
       )
     } else {
       cat(
@@ -1163,20 +1243,25 @@ server <- function(input, output, session) {
   
   # Optional split var UI offered when >=3 parsed columns
   output$prism_split_ui <- renderUI({
-    req(prism_group_candidates(), prism_n_parsed())
+    req(prism_group_candidates(), prism_n_parsed(), data_with_ct_ref())
     g <- prism_group_candidates()
+    
+    has_target <- "Target Name" %in% names(data_with_ct_ref())
+    split_choices <- c(stats::setNames(g, g))
+    if (has_target) split_choices <- c(split_choices, "Target Name" = "Target Name")
     
     if (prism_n_parsed() >= 3) {
       selectInput(
         "prism_split_var",
         "Which variable do you want to split the graphs by?",
-        choices = c("— Select a column —" = "", stats::setNames(g, g)),
+        choices = c("— Select a column —" = "", split_choices),
         selected = ""
       )
     } else {
       NULL
     }
   })
+  
   
   # Remaining candidates after removing split var (when used)
   prism_remaining_candidates <- reactive({
@@ -1186,13 +1271,19 @@ server <- function(input, output, session) {
     if (prism_n_parsed() >= 3) {
       req(!is.null(input$prism_split_var))
       if (!nzchar(input$prism_split_var)) return(character(0))
-      setdiff(g, input$prism_split_var)
+      
+      if (identical(input$prism_split_var, "Target Name")) {
+        g
+      } else {
+        setdiff(g, input$prism_split_var)
+      }
     } else {
       g
     }
   })
   
-  # Primary Prism grouping variable selection (required for both grouped and column export)
+  
+  # Primary Prism grouping variable selection
   output$prism_primary_ui <- renderUI({
     req(prism_remaining_candidates(), input$prism_table_type)
     g <- prism_remaining_candidates()
@@ -1209,7 +1300,7 @@ server <- function(input, output, session) {
     )
   })
   
-  # Secondary grouping variable (grouped mode only; optional)
+  # Secondary grouping variable (grouped mode only)
   output$prism_secondary_ui <- renderUI({
     req(prism_remaining_candidates(), input$prism_primary_group, input$prism_table_type)
     if (input$prism_table_type != "grouped") return(NULL)
@@ -1286,7 +1377,7 @@ server <- function(input, output, session) {
     )
   })
   
-  # Build Prism grouped table (rows = row_var; columns = group|replicate; values = averaged per replicate)
+  # Build Prism grouped table (rows = row_var; columns = group|replicate)
   prism_make_grouped_table <- function(df) {
     req(input$prism_primary_group, input$prism_row_var, input$prism_value_var, input$prism_replicate_id)
     req(nzchar(input$prism_primary_group))
@@ -1298,7 +1389,6 @@ server <- function(input, output, session) {
     value_var <- input$prism_value_var
     rep_id    <- input$prism_replicate_id
     
-    # Build a column-group label (primary or primary|secondary)
     if (is.null(col_secondary)) {
       df2 <- df %>% dplyr::mutate(.col_group = as.character(.data[[col_primary]]))
     } else {
@@ -1309,13 +1399,11 @@ server <- function(input, output, session) {
       ))
     }
     
-    # Collapse duplicates by averaging within (row_var, .col_group, rep_id)
     df3 <- df2 %>%
       dplyr::select(dplyr::all_of(row_var), .col_group, dplyr::all_of(rep_id), .value = dplyr::all_of(value_var)) %>%
       dplyr::group_by(dplyr::across(dplyr::all_of(c(row_var, ".col_group", rep_id)))) %>%
       dplyr::summarise(.value = r3(mean(.value, na.rm = TRUE)), .groups = "drop")
     
-    # Encode replicate IDs into column names for Prism grouped format
     df4 <- df3 %>%
       dplyr::arrange(.data[[row_var]], .col_group, .data[[rep_id]]) %>%
       dplyr::group_by(dplyr::across(dplyr::all_of(c(row_var, ".col_group")))) %>%
@@ -1337,7 +1425,7 @@ server <- function(input, output, session) {
       dplyr::arrange(.data[[row_var]])
   }
   
-  # Build Prism column table (compact): rows = replicate slots; columns = groups; single Target Name per file
+  # Build Prism column table (compact): one Target Name per file
   prism_make_column_table_one_target <- function(df, target_name) {
     req(input$prism_primary_group, input$prism_value_var, input$prism_replicate_id)
     req(nzchar(input$prism_primary_group))
@@ -1354,13 +1442,11 @@ server <- function(input, output, session) {
         Value = as.numeric(.data[[value_var]])
       )
     
-    # Collapse duplicates by averaging within (Group, ID)
     df2 <- df2 %>%
       dplyr::group_by(Group, ID) %>%
       dplyr::summarise(Value = r3(mean(Value, na.rm = TRUE)), .groups = "drop") %>%
       dplyr::arrange(Group, ID)
     
-    # Re-index each Group into replicate slots and pivot to Prism column layout
     df2 %>%
       dplyr::group_by(Group) %>%
       dplyr::arrange(ID, .by_group = TRUE) %>%
@@ -1376,7 +1462,7 @@ server <- function(input, output, session) {
       dplyr::select(-.row)
   }
   
-  # Build Prism column table (expanded): rows are replicate-labeled; columns = groups; single Target Name per file
+  # Build Prism column table (expanded): one Target Name per file
   prism_make_column_table_one_target_expanded <- function(df, target_name) {
     req(input$prism_primary_group, input$prism_value_var, input$prism_replicate_id)
     req(nzchar(input$prism_primary_group))
@@ -1404,9 +1490,7 @@ server <- function(input, output, session) {
       dplyr::arrange(RowTitle)
   }
   
-  # Assemble all Prism tables to preview/save:
-  # - Grouped mode: one table per split level (or ALL)
-  # - Column mode: one table per (split level × Target Name)
+  # Assemble all Prism tables to preview/save
   prism_tables <- reactive({
     req(data_with_ct_ref(), prism_n_parsed(), prism_group_candidates(), input$prism_table_type)
     df <- data_with_ct_ref()
@@ -1432,21 +1516,43 @@ server <- function(input, output, session) {
       }
     }
     
-    # Column mode: build one table per Target Name (and per split, if used)
-    targets <- sort(unique(as.character(df[["Target Name"]])))
-    if (length(targets) == 0) return(list())
+    targets_all <- sort(unique(as.character(df[["Target Name"]])))
+    if (length(targets_all) == 0) return(list())
     
     build_for_df <- function(d, split_label) {
-      out <- lapply(targets, function(tg) {
+      targets_local <- sort(unique(as.character(d[["Target Name"]])))
+      out <- lapply(targets_local, function(tg) {
         if (identical(input$prism_column_layout, "expanded")) {
           prism_make_column_table_one_target_expanded(d, tg)
         } else {
           prism_make_column_table_one_target(d, tg)
         }
       })
-      names(out) <- paste0(split_label, "__TARGET__", targets)
+      names(out) <- paste0(split_label, "__TARGET__", targets_local)
       out
     }
+    
+    if (prism_n_parsed() >= 3) {
+      req(!is.null(input$prism_split_var))
+      if (!nzchar(input$prism_split_var)) return(list())
+      
+      if (identical(input$prism_split_var, "Target Name")) {
+        return(build_for_df(df, split_label = "ALL"))
+      }
+      
+      split_var <- input$prism_split_var
+      split_levels <- sort(unique(as.character(df[[split_var]])))
+      
+      out_list <- list()
+      for (lvl in split_levels) {
+        df_sub <- df %>% dplyr::filter(as.character(.data[[split_var]]) == lvl)
+        out_list <- c(out_list, build_for_df(df_sub, split_label = lvl))
+      }
+      return(out_list)
+    } else {
+      return(build_for_df(df, split_label = "ALL"))
+    }
+    
     
     if (prism_n_parsed() >= 3) {
       req(!is.null(input$prism_split_var))
@@ -1466,7 +1572,7 @@ server <- function(input, output, session) {
     }
   })
   
-  # Prism preview shows the first generated table as a sanity check
+  # Prism preview shows the first generated table
   output$prism_preview <- renderDT({
     tabs <- prism_tables()
     if (length(tabs) == 0) {
@@ -1492,7 +1598,6 @@ server <- function(input, output, session) {
     req(nzchar(input$prism_title))
     req(exp_dir())
     
-    # Log save configuration for Prism export
     if (!is.null(logger())) {
       logger()$append_event(
         tab = input$page,
@@ -1507,16 +1612,15 @@ server <- function(input, output, session) {
           prism_secondary_group = input$prism_secondary_group %||% NA_character_,
           prism_row_var = input$prism_row_var %||% NA_character_,
           prism_value_var = input$prism_value_var,
-          prism_replicate_id = input$prism_replicate_id
+          prism_replicate_id = input$prism_replicate_id,
+          removed_ids_n = length(qc_removed_ids())
         )
       )
     }
     
-    # Write to exports/
     out_dir <- file.path(exp_dir(), "exports")
     dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
     
-    # Suffix describes organization choice (grouped vs column compact/expanded)
     layout_suffix <- if (input$prism_table_type == "grouped") {
       "_grouped"
     } else if (identical(input$prism_column_layout, "expanded")) {
@@ -1525,13 +1629,11 @@ server <- function(input, output, session) {
       "_column_compact"
     }
     
-    # Base filename prefix shared across all written files for this export
     safe_title <- gsub("[^A-Za-z0-9_-]+", "_", input$prism_title)
     safe_base  <- paste0(safe_title, layout_suffix)
     
     paths <- character(0)
     
-    # Write each table to its own CSV; include split/target tags in filename when needed
     for (nm in names(tabs)) {
       split_tag <- ""
       target_tag <- ""
@@ -1552,12 +1654,10 @@ server <- function(input, output, session) {
       paths <- c(paths, out_path)
     }
     
-    # Snapshot run context (inputs + QC + output paths + session package versions)
     if (!is.null(logger())) {
       in_list <- shiny::reactiveValuesToList(input)
       in_list$raw_files <- NULL
       
-      # Drop DT (DataTables) widget state inputs to avoid massive repeated JSON
       dt_prefixes <- c(
         "data_preview", "sample_parse_preview", "qc_fail_preview",
         "ctref_preview", "prism_preview"
@@ -1620,4 +1720,3 @@ server <- function(input, output, session) {
 # Run app
 # ============================================================
 shinyApp(ui, server)
-
