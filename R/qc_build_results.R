@@ -22,7 +22,7 @@ qc_build_results <- function(df_all, df_long, id_col, trt_col, meta_cols,
     )
   
   # QC1: reference gene CT outside expected range (18–22)
-  qc1 <- df_all %>%
+  qc1_all <- df_all %>%
     dplyr::filter(as.character(.data[["Target Name"]]) == ref_gene) %>%
     dplyr::mutate(
       observed = r3(as.numeric(CT)),
@@ -36,10 +36,9 @@ qc_build_results <- function(df_all, df_long, id_col, trt_col, meta_cols,
         is.na(how_off) ~ NA_character_,
         how_off >= 4   ~ "RED",
         how_off > 0    ~ "YELLOW",
-        TRUE           ~ NA_character_
+        TRUE           ~ "PASS"
       )
     ) %>%
-    dplyr::filter(!is.na(severity)) %>%
     dplyr::transmute(
       sample_id = as.character(.data[[id_col]]),
       treatment = as.character(.data[[trt_col]]),
@@ -50,14 +49,18 @@ qc_build_results <- function(df_all, df_long, id_col, trt_col, meta_cols,
       how_off   = r3(how_off),
       severity  = severity
     ) %>%
+    dplyr::filter(!is.na(sample_id) & nzchar(sample_id)) %>%
     dplyr::distinct()
+  
+  qc1_flags <- qc1_all %>%
+    dplyr::filter(severity %in% c("YELLOW", "RED"))
   
   # Add .is_mock flag for mock-only QC checks
   df_long2 <- df_long %>%
     dplyr::mutate(.is_mock = as.character(.data[[trt_col]]) == mock_value)
   
-  # QC2: mock dCt SD too high within (sample_id, treatment, target)
-  qc2 <- df_long2 %>%
+  # QC2: mock dCt SD within (sample_id, treatment, target)
+  qc2_all <- df_long2 %>%
     dplyr::filter(.is_mock) %>%
     dplyr::group_by(
       sample_id = as.character(.data[[id_col]]),
@@ -78,10 +81,9 @@ qc_build_results <- function(df_all, df_long, id_col, trt_col, meta_cols,
         is.na(observed) ~ NA_character_,
         observed > 1.0  ~ "RED",
         observed >= 0.5 ~ "YELLOW",
-        TRUE            ~ NA_character_
+        TRUE            ~ "PASS"
       )
     ) %>%
-    dplyr::filter(!is.na(severity)) %>%
     dplyr::transmute(
       sample_id = sample_id,
       treatment = treatment,
@@ -92,10 +94,14 @@ qc_build_results <- function(df_all, df_long, id_col, trt_col, meta_cols,
       how_off   = r3(how_off),
       severity  = severity
     ) %>%
+    dplyr::filter(!is.na(sample_id) & nzchar(sample_id)) %>%
     dplyr::distinct()
   
-  # QC3: mock relative expression too far from 1 (absolute deviation thresholds)
-  qc3 <- df_long2 %>%
+  qc2_flags <- qc2_all %>%
+    dplyr::filter(severity %in% c("YELLOW", "RED"))
+  
+  # QC3: mock relative expression deviation from 1
+  qc3_all <- df_long2 %>%
     dplyr::filter(.is_mock) %>%
     dplyr::mutate(
       observed = r3(as.numeric(relative_expression)),
@@ -104,10 +110,9 @@ qc_build_results <- function(df_all, df_long, id_col, trt_col, meta_cols,
         is.na(how_off) ~ NA_character_,
         how_off >= 4   ~ "RED",
         how_off > 1    ~ "YELLOW",
-        TRUE           ~ NA_character_
+        TRUE           ~ "PASS"
       )
     ) %>%
-    dplyr::filter(!is.na(severity)) %>%
     dplyr::transmute(
       sample_id = as.character(.data[[id_col]]),
       treatment = as.character(.data[[trt_col]]),
@@ -118,11 +123,33 @@ qc_build_results <- function(df_all, df_long, id_col, trt_col, meta_cols,
       how_off   = r3(how_off),
       severity  = severity
     ) %>%
+    dplyr::filter(!is.na(sample_id) & nzchar(sample_id)) %>%
     dplyr::distinct()
   
-  # Combine QC flags + attach metadata + order by severity
-  qc_table <- dplyr::bind_rows(qc1, qc2, qc3) %>%
-    dplyr::filter(!is.na(sample_id) & nzchar(sample_id)) %>%
+  qc3_flags <- qc3_all %>%
+    dplyr::filter(severity %in% c("YELLOW", "RED"))
+  
+  # Full QC calculations table (PASS + flags) + attach metadata
+  qc_calc_table <- dplyr::bind_rows(qc1_all, qc2_all, qc3_all) %>%
+    dplyr::left_join(meta_map, by = "sample_id") %>%
+    dplyr::mutate(
+      severity_rank = dplyr::case_when(
+        severity == "RED"    ~ 2L,
+        severity == "YELLOW" ~ 1L,
+        severity == "PASS"   ~ 0L,
+        TRUE                 ~ -1L
+      )
+    ) %>%
+    dplyr::arrange(dplyr::desc(severity_rank), treatment, sample_id, flag, target) %>%
+    dplyr::select(
+      sample_id,
+      treatment,
+      dplyr::all_of(meta_extra),
+      target, flag, observed, expected, how_off, severity
+    )
+  
+  # Flag-only QC table (unchanged behavior) + attach metadata
+  qc_table <- dplyr::bind_rows(qc1_flags, qc2_flags, qc3_flags) %>%
     dplyr::left_join(meta_map, by = "sample_id") %>%
     dplyr::mutate(
       severity_rank = dplyr::case_when(
@@ -139,5 +166,5 @@ qc_build_results <- function(df_all, df_long, id_col, trt_col, meta_cols,
       target, flag, observed, expected, how_off, severity
     )
   
-  list(qc_table = qc_table)
+  list(qc_table = qc_table, qc_calc_table = qc_calc_table)
 }
