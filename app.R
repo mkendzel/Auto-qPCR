@@ -32,7 +32,7 @@ ui <- fluidPage(
     id = "page",
     
     # ============================================================
-    # TAB 1) Import
+    # TAB 1) Import UI
     # ============================================================
     tabPanel(
       title = "1) Import",
@@ -96,7 +96,7 @@ ui <- fluidPage(
     ),
     
     # ============================================================
-    # TAB 2) Parse Sample Names
+    # TAB 2) Parse Sample Names UI
     # ============================================================
     tabPanel(
       title = "2) Parse Sample Names",
@@ -169,7 +169,7 @@ ui <- fluidPage(
     ),
     
     # ============================================================
-    # TAB 3) QC
+    # TAB 3) QC UI
     # ============================================================
     tabPanel(
       title = "3) QC",
@@ -229,7 +229,7 @@ ui <- fluidPage(
     ),
     
     # ============================================================
-    # TAB 4) Long format Export
+    # TAB 4) Long format Export UI
     # ============================================================
     tabPanel(
       title = "4) Long format Export",
@@ -274,7 +274,7 @@ ui <- fluidPage(
     ),
     
     # ============================================================
-    # TAB 5) Prism Export
+    # TAB 5) Prism Export UI
     # ============================================================
     tabPanel(
       title = "5) Prism Export",
@@ -827,142 +827,18 @@ server <- function(input, output, session) {
     trt_col   <- input$treatment_col
     meta_cols <- parsed_part_cols()
     
-    # Extra metadata columns carried into QC output (excluding id + treatment)
-    meta_extra <- setdiff(meta_cols, c(id_col, trt_col))
-    
-    # Map sample_id -> metadata values (first seen per sample)
-    meta_map <- df_all %>%
-      dplyr::transmute(
-        sample_id = as.character(.data[[id_col]]),
-        dplyr::across(dplyr::all_of(meta_extra), ~ as.character(.x))
-      ) %>%
-      dplyr::filter(!is.na(sample_id) & nzchar(sample_id)) %>%
-      dplyr::group_by(sample_id) %>%
-      dplyr::summarise(
-        dplyr::across(dplyr::all_of(meta_extra), ~ dplyr::first(.x)),
-        .groups = "drop"
-      )
-    
-    # QC1: reference gene CT outside expected range (18–22)
-    qc1 <- df_all %>%
-      dplyr::filter(as.character(.data[["Target Name"]]) == input$ref_gene) %>%
-      dplyr::mutate(
-        observed = r3(as.numeric(CT)),
-        how_off = dplyr::case_when(
-          is.na(observed) ~ NA_real_,
-          observed < 18   ~ 18 - observed,
-          observed > 22   ~ observed - 22,
-          TRUE            ~ 0
-        ),
-        severity = dplyr::case_when(
-          is.na(how_off) ~ NA_character_,
-          how_off >= 4   ~ "RED",
-          how_off > 0    ~ "YELLOW",
-          TRUE           ~ NA_character_
-        )
-      ) %>%
-      dplyr::filter(!is.na(severity)) %>%
-      dplyr::transmute(
-        sample_id = as.character(.data[[id_col]]),
-        treatment = as.character(.data[[trt_col]]),
-        target    = as.character(input$ref_gene),
-        flag      = "Ref CT out of range",
-        observed  = observed,
-        expected  = "18–22",
-        how_off   = r3(how_off),
-        severity  = severity
-      ) %>%
-      dplyr::distinct()
-    
-    # Add .is_mock flag for mock-only QC checks
-    df_long2 <- df_long %>%
-      dplyr::mutate(.is_mock = as.character(.data[[trt_col]]) == input$mock_value)
-    
-    # QC2: mock dCt SD too high within (sample_id, treatment, target)
-    qc2 <- df_long2 %>%
-      dplyr::filter(.is_mock) %>%
-      dplyr::group_by(
-        sample_id = as.character(.data[[id_col]]),
-        treatment = as.character(.data[[trt_col]]),
-        target    = as.character(.data[["Target Name"]])
-      ) %>%
-      dplyr::summarise(
-        observed = r3(stats::sd(dCt, na.rm = TRUE)),
-        .groups  = "drop"
-      ) %>%
-      dplyr::mutate(
-        how_off = dplyr::case_when(
-          is.na(observed) ~ NA_real_,
-          observed >= 0.5 ~ observed - 0.5,
-          TRUE            ~ 0
-        ),
-        severity = dplyr::case_when(
-          is.na(observed) ~ NA_character_,
-          observed > 1.0  ~ "RED",
-          observed >= 0.5 ~ "YELLOW",
-          TRUE            ~ NA_character_
-        )
-      ) %>%
-      dplyr::filter(!is.na(severity)) %>%
-      dplyr::transmute(
-        sample_id = sample_id,
-        treatment = treatment,
-        target    = target,
-        flag      = "Mock dCt SD high",
-        observed  = observed,
-        expected  = "≤0.5 ok; >1 fail",
-        how_off   = r3(how_off),
-        severity  = severity
-      ) %>%
-      dplyr::distinct()
-    
-    # QC3: mock relative expression too far from 1 (absolute deviation thresholds)
-    qc3 <- df_long2 %>%
-      dplyr::filter(.is_mock) %>%
-      dplyr::mutate(
-        observed = r3(as.numeric(relative_expression)),
-        how_off  = dplyr::if_else(is.na(observed), NA_real_, abs(observed - 1)),
-        severity = dplyr::case_when(
-          is.na(how_off) ~ NA_character_,
-          how_off >= 4   ~ "RED",
-          how_off > 1    ~ "YELLOW",
-          TRUE           ~ NA_character_
-        )
-      ) %>%
-      dplyr::filter(!is.na(severity)) %>%
-      dplyr::transmute(
-        sample_id = as.character(.data[[id_col]]),
-        treatment = as.character(.data[[trt_col]]),
-        target    = as.character(.data[["Target Name"]]),
-        flag      = "Mock rel expr far from 1",
-        observed  = observed,
-        expected  = "1±1 warn; 1±4 fail",
-        how_off   = r3(how_off),
-        severity  = severity
-      ) %>%
-      dplyr::distinct()
-    
-    # Combine QC flags + attach metadata + order by severity
-    qc_table <- dplyr::bind_rows(qc1, qc2, qc3) %>%
-      dplyr::filter(!is.na(sample_id) & nzchar(sample_id)) %>%
-      dplyr::left_join(meta_map, by = "sample_id") %>%
-      dplyr::mutate(
-        severity_rank = dplyr::case_when(
-          severity == "RED"    ~ 2L,
-          severity == "YELLOW" ~ 1L,
-          TRUE                 ~ 0L
-        )
-      ) %>%
-      dplyr::arrange(dplyr::desc(severity_rank), treatment, sample_id, flag, target) %>%
-      dplyr::select(
-        sample_id,
-        treatment,
-        dplyr::all_of(meta_extra),
-        target, flag, observed, expected, how_off, severity
-      )
-    
-    list(qc_table = qc_table)
+    qc_build_results(
+      df_all = df_all,
+      df_long = df_long,
+      id_col = id_col,
+      trt_col = trt_col,
+      meta_cols = meta_cols,
+      ref_gene = input$ref_gene,
+      mock_value = input$mock_value,
+      r3 = r3
+    )
   })
+  
   
   # Tab 3: QC summary counts
   qc_metric_labels <- c(
@@ -1032,12 +908,29 @@ server <- function(input, output, session) {
     openxlsx::writeData(wb, "qc_index", qc_results()$qc_table)
     openxlsx::saveWorkbook(wb, out_path_xlsx, overwrite = TRUE)
     
+    # Write QC calcs full table into meta_data/
+    meta_dir <- file.path(exp_dir(), "meta_data")
+    dir.create(meta_dir, recursive = TRUE, showWarnings = FALSE)
+    
+    qc_calcs_path <- file.path(meta_dir, paste0(base_name, "_qc_calcs_full.xlsx"))
+    
+    wb2 <- openxlsx::createWorkbook()
+    openxlsx::addWorksheet(wb2, "qc_calcs_full")
+    openxlsx::writeData(wb2, "qc_calcs_full", qc_results()$qc_calc_table)
+    openxlsx::saveWorkbook(wb2, qc_calcs_path, overwrite = TRUE)
+    
     # Log the output path
     if (!is.null(logger())) {
       logger()$append_event(
         tab = input$page,
         action = "qc_edit_xlsx_saved",
         details = list(out_path_xlsx = out_path_xlsx)
+      )
+      
+      logger()$append_event(
+        tab = input$page,
+        action = "qc_calcs_full_saved",
+        details = list(qc_calcs_path = qc_calcs_path)
       )
     }
     
@@ -1055,6 +948,7 @@ server <- function(input, output, session) {
       )
     )
   })
+
   
   # Tab 3 Continue: block if QC flags exist unless override is checked; then unlock Tabs 4/5
   observeEvent(input$continue_to_review, {
