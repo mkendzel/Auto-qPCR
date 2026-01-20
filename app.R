@@ -190,15 +190,14 @@ ui <- fluidPage(
       
       tags$hr(),
       
-      h4("Save QC outputs"),
+      h4("Save QC outputs before continuing"),
       
-      # Title used to write QC outputs into experiment meta_data/
+      # Title used to write QC outputs into experiment qc/
       textInput(
         "qc_title",
-        "QC output file name (saved to experiment meta_data/)",
+        "QC output file name (saved to experiment's qc/) (example: 1st_pass)",
         value = ""
       ),
-      helpText("Name for current QC pass (example: experimentname_qc_1)"),
       
       # Confirmation gate for writing QC outputs
       checkboxInput(
@@ -207,7 +206,7 @@ ui <- fluidPage(
         value = FALSE
       ),
       
-      # Writes <qc_title>_qc_calcs_full.xlsx and <qc_title>_qc_flags.xlsx to meta_data/
+      # Writes <qc_title>_qc_calcs_full.xlsx and <qc_title>_qc_flags.xlsx to qc/
       actionButton("save_qc_outputs", "Save QC outputs", class = "btn-primary"),
       
       tags$hr(),
@@ -274,7 +273,7 @@ ui <- fluidPage(
       # Title used as prefix for long export CSV filename
       textInput(
         "out_title",
-        "Output table title (used for filename)",
+        "Output table title (e.g. experiment1)",
         value = ""
       ),
       
@@ -902,7 +901,7 @@ server <- function(input, output, session) {
   qc_save_status_val <- reactiveVal("")
   output$qc_save_status <- renderText({ qc_save_status_val() })
   
-  # Save QC outputs to meta_data/
+  # Save QC outputs to qc/
   observeEvent(input$save_qc_outputs, {
     req(qc_results())
     req(isTRUE(input$qc_save_ok))
@@ -911,11 +910,11 @@ server <- function(input, output, session) {
     
     base_name <- gsub("[^A-Za-z0-9_-]+", "_", input$qc_title)
     
-    meta_dir <- file.path(exp_dir(), "meta_data")
-    dir.create(meta_dir, recursive = TRUE, showWarnings = FALSE)
+    qc_dir <- file.path(exp_dir(), "qc")
+    dir.create(qc_dir, recursive = TRUE, showWarnings = FALSE)
     
-    qc_calcs_path <- file.path(meta_dir, paste0(base_name, "_qc_calcs_full.xlsx"))
-    qc_flags_path <- file.path(meta_dir, paste0(base_name, "_qc_flags.xlsx"))
+    qc_calcs_path <- file.path(qc_dir, paste0(base_name, "_qc_calcs_full.xlsx"))
+    qc_flags_path <- file.path(qc_dir, paste0(base_name, "_qc_flags.xlsx"))
     
     wb1 <- openxlsx::createWorkbook()
     openxlsx::addWorksheet(wb1, "qc_calcs_full")
