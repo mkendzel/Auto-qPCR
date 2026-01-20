@@ -436,6 +436,15 @@ server <- function(input, output, session) {
     sanitize_experiment_name(input$experiment_name)
   })
   
+  ensure_experiment_dirs <- function(base_dir) {
+    dir.create(file.path(base_dir, "raw"), recursive = TRUE, showWarnings = FALSE)
+    dir.create(file.path(base_dir, "processed"), recursive = TRUE, showWarnings = FALSE)
+    dir.create(file.path(base_dir, "qc"), recursive = TRUE, showWarnings = FALSE)
+    dir.create(file.path(base_dir, "meta_data"), recursive = TRUE, showWarnings = FALSE)
+    dir.create(file.path(base_dir, "exports"), recursive = TRUE, showWarnings = FALSE)
+    invisible(TRUE)
+  }
+  
   # Root experiment directory: data/<experiment_name_safe>
   exp_dir <- reactive({
     nm <- exp_name_safe()
