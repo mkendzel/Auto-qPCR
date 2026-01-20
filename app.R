@@ -422,6 +422,15 @@ server <- function(input, output, session) {
   # Gate removals/continue until QC outputs have been saved once
   qc_saved_once <- reactiveVal(FALSE)
   
+  sanitize_experiment_name <- function(x) {
+    x <- trimws(as.character(x))
+    x <- gsub("[^A-Za-z0-9_-]+", "_", x)
+    x <- gsub("_+", "_", x)
+    x <- gsub("^[_-]+|[_-]+$", "", x)
+    if (!nzchar(x)) return("")
+    tolower(x)
+  }
+  
   # Sanitized experiment name used for folder paths
   exp_name_safe <- reactive({
     sanitize_experiment_name(input$experiment_name)
