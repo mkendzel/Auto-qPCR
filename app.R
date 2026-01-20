@@ -5,6 +5,12 @@
 # ============================================================
 # Dependencies
 # ============================================================
+if (requireNamespace("renv", quietly = TRUE)) {
+  if (file.exists("renv.lock")) {
+    renv::restore(prompt = FALSE)
+  }
+}
+
 library(shiny)
 library(readxl)
 library(openxlsx)
@@ -19,7 +25,9 @@ invisible(lapply(list.files("R", "\\.R$", full.names = TRUE), source, local = FA
 
 # Keep validate/need using shiny namespace
 validate <- shiny::validate
-need <- shiny::need 
+need <- shiny::need
+
+
 
 ## =========================
 ## UI
