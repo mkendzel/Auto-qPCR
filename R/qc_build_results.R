@@ -8,18 +8,9 @@ qc_build_results <- function(df_all, df_long, id_col, trt_col, meta_cols,
   # Extra metadata columns carried into QC output (excluding id + treatment)
   meta_extra <- setdiff(meta_cols, c(id_col, trt_col))
   
-  # Map sample_id -> metadata values (first seen per sample)
-  meta_map <- df_all %>%
-    dplyr::transmute(
-      sample_id = as.character(.data[[id_col]]),
-      dplyr::across(dplyr::all_of(meta_extra), ~ as.character(.x))
-    ) %>%
-    dplyr::filter(!is.na(sample_id) & nzchar(sample_id)) %>%
-    dplyr::group_by(sample_id) %>%
-    dplyr::summarise(
-      dplyr::across(dplyr::all_of(meta_extra), ~ dplyr::first(.x)),
-      .groups = "drop"
-    )
+  # Grouping columns used throughout QC checks: sample_id + treatment + meta_extra
+  # This preserves tissue (or any other extra parsed column) instead of collapsing it
+  qc_group_ids <- c("sample_id", "treatment", meta_extra)
   
   # QC1: reference gene CT outside expected range (18–22)
   qc1_all <- df_all %>%
@@ -42,10 +33,11 @@ qc_build_results <- function(df_all, df_long, id_col, trt_col, meta_cols,
     dplyr::transmute(
       sample_id = as.character(.data[[id_col]]),
       treatment = as.character(.data[[trt_col]]),
+      dplyr::across(dplyr::all_of(meta_extra), ~ as.character(.x)),
       target    = as.character(ref_gene),
       flag      = "Ref CT out of range",
       observed  = observed,
-      expected  = "18–22",
+      expected  = "18\u201322",
       how_off   = r3(how_off),
       severity  = severity
     ) %>%
@@ -59,12 +51,13 @@ qc_build_results <- function(df_all, df_long, id_col, trt_col, meta_cols,
   df_long2 <- df_long %>%
     dplyr::mutate(.is_mock = as.character(.data[[trt_col]]) == mock_value)
   
-  # QC2: mock dCt SD within (sample_id, treatment, target)
+  # QC2: mock dCt SD within (sample_id, treatment, meta_extra, target)
   qc2_all <- df_long2 %>%
     dplyr::filter(.is_mock) %>%
     dplyr::group_by(
       sample_id = as.character(.data[[id_col]]),
       treatment = as.character(.data[[trt_col]]),
+      dplyr::across(dplyr::all_of(meta_extra)),
       target    = as.character(.data[["Target Name"]])
     ) %>%
     dplyr::summarise(
@@ -87,10 +80,11 @@ qc_build_results <- function(df_all, df_long, id_col, trt_col, meta_cols,
     dplyr::transmute(
       sample_id = sample_id,
       treatment = treatment,
+      dplyr::across(dplyr::all_of(meta_extra)),
       target    = target,
       flag      = "Mock dCt SD high",
       observed  = observed,
-      expected  = "≤0.5 ok; >1 fail",
+      expected  = "\u22640.5 ok; >1 fail",
       how_off   = r3(how_off),
       severity  = severity
     ) %>%
@@ -116,10 +110,11 @@ qc_build_results <- function(df_all, df_long, id_col, trt_col, meta_cols,
     dplyr::transmute(
       sample_id = as.character(.data[[id_col]]),
       treatment = as.character(.data[[trt_col]]),
+      dplyr::across(dplyr::all_of(meta_extra), ~ as.character(.x)),
       target    = as.character(.data[["Target Name"]]),
       flag      = "Mock rel expr far from 1",
       observed  = observed,
-      expected  = "1±1 warn; 1±4 fail",
+      expected  = "1\u00b11 warn; 1\u00b14 fail",
       how_off   = r3(how_off),
       severity  = severity
     ) %>%
@@ -129,9 +124,8 @@ qc_build_results <- function(df_all, df_long, id_col, trt_col, meta_cols,
   qc3_flags <- qc3_all %>%
     dplyr::filter(severity %in% c("YELLOW", "RED"))
   
-  # Full QC calculations table (PASS + flags) + attach metadata
+  # Full QC calculations table (PASS + flags)
   qc_calc_table <- dplyr::bind_rows(qc1_all, qc2_all, qc3_all) %>%
-    dplyr::left_join(meta_map, by = "sample_id") %>%
     dplyr::mutate(
       severity_rank = dplyr::case_when(
         severity == "RED"    ~ 2L,
@@ -148,9 +142,8 @@ qc_build_results <- function(df_all, df_long, id_col, trt_col, meta_cols,
       target, flag, observed, expected, how_off, severity
     )
   
-  # Flag-only QC table (unchanged behavior) + attach metadata
+  # Flag-only QC table
   qc_table <- dplyr::bind_rows(qc1_flags, qc2_flags, qc3_flags) %>%
-    dplyr::left_join(meta_map, by = "sample_id") %>%
     dplyr::mutate(
       severity_rank = dplyr::case_when(
         severity == "RED"    ~ 2L,
